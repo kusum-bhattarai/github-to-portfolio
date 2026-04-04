@@ -24,7 +24,9 @@ public class TokenEncryptionService {
     private final SecureRandom secureRandom = new SecureRandom();
 
     public TokenEncryptionService(@Value("${app.token-encryption-key}") String base64Key) {
-        byte[] keyBytes = Base64.getDecoder().decode(base64Key);
+        // Normalize: accept both standard (+/) and URL-safe (-_) base64
+        String normalized = base64Key.replace('-', '+').replace('_', '/');
+        byte[] keyBytes = Base64.getDecoder().decode(normalized);
         if (keyBytes.length != 32) {
             throw new IllegalArgumentException(
                 "TOKEN_ENCRYPTION_KEY must be a base64-encoded 32-byte key. " +
