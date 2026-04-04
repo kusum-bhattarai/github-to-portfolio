@@ -6,6 +6,19 @@ export interface CurrentUser {
   createdAt: string;
 }
 
+export interface Repo {
+  id: string;
+  githubRepoId: number;
+  name: string;
+  fullName: string;
+  description: string;
+  primaryLanguage: string;
+  stars: number;
+  forks: number;
+  topics: string[];
+  htmlUrl: string;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, { credentials: 'include', ...options });
   if (!res.ok) {
@@ -18,4 +31,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   me: () => request<CurrentUser>('/api/me'),
+  repos: {
+    list: () => request<Repo[]>('/api/repos'),
+    sync: () => request<Repo[]>('/api/repos/sync', { method: 'POST' }),
+  },
 };
