@@ -1,0 +1,57 @@
+spring:
+  application:
+    name: github-portfolio-backend
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/portfolio
+    username: portfolio
+    password: ${POSTGRES_PASSWORD:portfolio_dev}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+
+  security:
+    oauth2:
+      client:
+        registration:
+          github:
+            client-id: ${GITHUB_CLIENT_ID}
+            client-secret: ${GITHUB_CLIENT_SECRET}
+            scope:
+              - read:user
+              - user:email
+              - public_repo
+
+server:
+  port: 8080
+
+app:
+  token-encryption-key: ${TOKEN_ENCRYPTION_KEY:dev_key_replace_in_production}
+  frontend-url: ${FRONTEND_URL:http://localhost:3000}
+  llm:
+    api-key: ${LLM_API_KEY:}
+
+logging:
+  level:
+    com.portfolio: DEBUG
+    org.springframework.security: INFO
+
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+  datasource:
+    url: jdbc:postgresql://postgres:5432/portfolio
