@@ -1,6 +1,8 @@
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080';
+
 export default function LoginPage() {
   const handleLogin = () => {
-    window.location.href = '/oauth2/authorization/github';
+    window.location.href = `${BACKEND_URL}/oauth2/authorization/github`;
   };
 
   return (
