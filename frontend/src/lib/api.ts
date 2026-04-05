@@ -19,6 +19,29 @@ export interface Repo {
   htmlUrl: string;
 }
 
+export interface ContentBlock {
+  id: string;
+  contentType: 'PORTFOLIO_SUMMARY' | 'RESUME_BULLETS' | 'TECH_STACK' | 'PROJECT_TAGS';
+  generatedText: string;
+  editedText: string | null;
+  isEdited: boolean;
+  createdAt: string;
+}
+
+export interface ProjectSummary {
+  repoId: string;
+  repoName: string;
+  repoFullName: string;
+  description: string | null;
+  primaryLanguage: string | null;
+  stars: number;
+  htmlUrl: string;
+  analyzedAt: string | null;
+  projectType: string | null;
+  projectTags: string | null;
+  portfolioSummary: string | null;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, { credentials: 'include', ...options });
   if (!res.ok) {
@@ -27,13 +50,6 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw err;
   }
   return res.json();
-}
-
-export interface ContentBlock {
-  id: string;
-  contentType: 'PORTFOLIO_SUMMARY' | 'RESUME_BULLETS' | 'TECH_STACK' | 'PROJECT_TAGS';
-  generatedText: string;
-  createdAt: string;
 }
 
 export const api = {
@@ -45,5 +61,14 @@ export const api = {
   analysis: {
     analyze: (repoId: string) => request<ContentBlock[]>(`/api/repos/${repoId}/analyze`, { method: 'POST' }),
     getContent: (repoId: string) => request<ContentBlock[]>(`/api/projects/${repoId}/content`),
+  },
+  projects: {
+    list: () => request<ProjectSummary[]>('/api/projects'),
+    saveEdit: (repoId: string, contentId: string, text: string) =>
+      request(`/api/projects/${repoId}/content/${contentId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      }),
   },
 };

@@ -127,6 +127,12 @@ export default function DashboardPage() {
             <img src={user.avatarUrl} alt={user.username} className="w-8 h-8 rounded-full" />
           )}
           <span className="text-gray-300 text-sm">{user?.username}</span>
+          <button
+            onClick={() => navigate('/workspace')}
+            className="text-sm text-gray-400 hover:text-white transition-colors"
+          >
+            Workspace
+          </button>
           <button onClick={handleLogout} className="text-sm text-gray-400 hover:text-white transition-colors">
             Log out
           </button>
