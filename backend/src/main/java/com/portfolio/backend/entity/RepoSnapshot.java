@@ -40,6 +40,17 @@ public class RepoSnapshot {
     @Column(name = "extracted_signals", columnDefinition = "jsonb")
     private Map<String, Object> extractedSignals;
 
+    @Column(name = "project_type")
+    private String projectType;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "parsed_dependencies", columnDefinition = "jsonb")
+    private Map<String, Object> parsedDependencies;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "quantitative_metrics", columnDefinition = "jsonb")
+    private Map<String, Object> quantitativeMetrics;
+
     @Column(name = "analyzed_at", nullable = false)
     private OffsetDateTime analyzedAt;
 
