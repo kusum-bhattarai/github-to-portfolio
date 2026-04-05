@@ -43,12 +43,15 @@ public class AnalysisService {
         // Extract evidence
         EvidenceExtractor.ExtractionResult evidence = evidenceExtractor.extract(repo, accessToken);
 
-        // Persist snapshot
+        // Persist snapshot with full Phase 4 evidence
         RepoSnapshot snapshot = snapshotRepository.findByRepository(repo)
                 .orElseGet(() -> RepoSnapshot.builder().repository(repo).build());
         snapshot.setReadmeContent(evidence.readmeContent());
         snapshot.setDetectedStack(evidence.detectedStack());
         snapshot.setExtractedSignals(evidence.signals());
+        snapshot.setProjectType(evidence.projectType());
+        snapshot.setParsedDependencies(evidence.parsedDependencies());
+        snapshot.setQuantitativeMetrics(evidence.quantitativeMetrics());
         snapshotRepository.save(snapshot);
 
         // Call LLM
