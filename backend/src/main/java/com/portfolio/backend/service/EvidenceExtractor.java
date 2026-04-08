@@ -60,13 +60,16 @@ public class EvidenceExtractor {
         Map<String, Object> signals = detectSignals(tree, repo);
         Map<String, Object> parsedDeps = parseConfigFiles(owner, repoName, accessToken, tree, signals);
         Map<String, Object> metrics = fetchQuantitativeMetrics(owner, repoName, accessToken, tree, readme);
+        List<String> commitMessages = fetchRecentCommits(owner, repoName, accessToken);
+        Map<String, Object> commitSignals = parseCommitSignals(commitMessages);
         List<String> stack = buildStack(repo, signals, parsedDeps);
         String projectType = classifyProjectType(repo, signals, parsedDeps, stack);
 
-        log.info("Extracted evidence for {} — type: {}, stack: {}, metrics: {}",
-                repo.getFullName(), projectType, stack, metrics);
+        log.info("Extracted evidence for {} — type: {}, stack: {}, metrics: {}, commit features: {}",
+                repo.getFullName(), projectType, stack, metrics,
+                commitSignals.get("detectedFeatures"));
 
-        return new ExtractionResult(readme, stack, signals, projectType, parsedDeps, metrics);
+        return new ExtractionResult(readme, stack, signals, projectType, parsedDeps, metrics, commitSignals);
     }
 
     // ─── README ──────────────────────────────────────────────────────────────
@@ -886,6 +889,88 @@ public class EvidenceExtractor {
         }
 
         return "Software Project";
+    }
+
+    // ─── Commit history intelligence (Phase 7) ──────────────────────────────
+
+    @SuppressWarnings("unchecked")
+    private List<String> fetchRecentCommits(String owner, String repo, String token) {
+        try {
+            String url = GITHUB_API + "/repos/" + owner + "/" + repo + "/commits?per_page=30";
+            ResponseEntity<List<Map<String, Object>>> response = restTemplate.exchange(
+                    url, HttpMethod.GET, authHeaders(token),
+                    new ParameterizedTypeReference<>() {}
+            );
+            if (response.getBody() == null) return List.of();
+            return response.getBody().stream()
+                    .map(c -> {
+                        Map<String, Object> commit = (Map<String, Object>) c.get("commit");
+                        if (commit == null) return "";
+                        String msg = (String) commit.get("message");
+                        if (msg == null || msg.isBlank()) return "";
+                        // Use only the subject line (first line) to reduce noise
+                        return msg.split("\n")[0].trim();
+                    })
+                    .filter(m -> !m.isBlank())
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            log.debug("Failed to fetch commit messages for {}/{}: {}", owner, repo, e.getMessage());
+            return List.of();
+        }
+    }
+
+    private Map<String, Object> parseCommitSignals(List<String> messages) {
+        if (messages.isEmpty()) return Map.of();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("messagesAnalyzed", messages.size());
+
+        String allMessages = String.join(" ", messages).toLowerCase();
+
+        // ── Feature category detection ────────────────────────────────────────
+        Map<String, Boolean> categories = new LinkedHashMap<>();
+        categories.put("hasAuthFeatures",    matches(allMessages, "auth", "login", "oauth", "jwt", "session", "password", "signup", "token", "sso", "2fa"));
+        categories.put("hasRealTimeFeatures", matches(allMessages, "websocket", "socket.io", "streaming", "realtime", "real-time", "notification", "pubsub", "sse", "event-driven", "broadcast"));
+        categories.put("hasCachingLayer",    matches(allMessages, "cache", "redis", "memcach", "cdn", "ttl", "evict", "invalidat"));
+        categories.put("hasDockerWork",      matches(allMessages, "docker", "containerize", "dockerfile", "compose", "k8s", "kubernetes", "helm"));
+        categories.put("hasCiCdWork",        matches(allMessages, "ci/cd", "pipeline", "workflow", "deploy", "release", "publish", "github action", "ci ", " cd "));
+        categories.put("hasRefactoring",     matches(allMessages, "refactor", "cleanup", "clean up", "restructure", "extract", "decouple", "reorganize", "simplif"));
+        categories.put("hasPerformanceWork", matches(allMessages, "optim", "perf", "latency", "throughput", "faster", "benchmark", "bottleneck", "profil", "n+1"));
+        categories.put("hasTestingWork",     matches(allMessages, "test", "spec", "coverage", "unit test", "integration test", "e2e", "mock", "fixture", "assert"));
+        categories.put("hasDatabaseWork",    matches(allMessages, "migration", "schema", "index", "query", "db ", "sql", "table", "column", "flyway", "liquibase", "seed"));
+        categories.put("hasSecurityWork",    matches(allMessages, "security", "vuln", "sanitize", "validate", "xss", "csrf", "injection", "encrypt", "rate limit", "cors"));
+        categories.put("hasApiDesignWork",   matches(allMessages, "endpoint", "route", "rest api", "graphql", "version", "swagger", "openapi", "paginate", "pagination"));
+        categories.put("hasAsyncWork",       matches(allMessages, "async", "concurrent", "thread", "background job", "queue", "worker", "message", "event"));
+        result.put("categories", categories);
+
+        // ── Human-readable feature list for LLM prompt ────────────────────────
+        List<String> detectedFeatures = new ArrayList<>();
+        if (Boolean.TRUE.equals(categories.get("hasAuthFeatures")))     detectedFeatures.add("authentication / authorization");
+        if (Boolean.TRUE.equals(categories.get("hasRealTimeFeatures"))) detectedFeatures.add("real-time features (WebSocket/SSE)");
+        if (Boolean.TRUE.equals(categories.get("hasCachingLayer")))     detectedFeatures.add("caching layer");
+        if (Boolean.TRUE.equals(categories.get("hasDockerWork")))       detectedFeatures.add("containerization");
+        if (Boolean.TRUE.equals(categories.get("hasCiCdWork")))         detectedFeatures.add("CI/CD pipeline");
+        if (Boolean.TRUE.equals(categories.get("hasRefactoring")))      detectedFeatures.add("refactoring passes");
+        if (Boolean.TRUE.equals(categories.get("hasPerformanceWork")))  detectedFeatures.add("performance optimization");
+        if (Boolean.TRUE.equals(categories.get("hasTestingWork")))      detectedFeatures.add("test coverage investment");
+        if (Boolean.TRUE.equals(categories.get("hasDatabaseWork")))     detectedFeatures.add("database design / migrations");
+        if (Boolean.TRUE.equals(categories.get("hasSecurityWork")))     detectedFeatures.add("security hardening");
+        if (Boolean.TRUE.equals(categories.get("hasApiDesignWork")))    detectedFeatures.add("API design / versioning");
+        if (Boolean.TRUE.equals(categories.get("hasAsyncWork")))        detectedFeatures.add("async / background processing");
+        result.put("detectedFeatures", detectedFeatures);
+
+        // ── Sample commit messages — give LLM context on what was actually built ─
+        result.put("recentMessages", messages.stream().limit(10).collect(Collectors.toList()));
+
+        log.debug("Commit signals from {} messages: features={}", messages.size(), detectedFeatures);
+        return result;
+    }
+
+    private boolean matches(String text, String... keywords) {
+        for (String keyword : keywords) {
+            if (text.contains(keyword)) return true;
+        }
+        return false;
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────

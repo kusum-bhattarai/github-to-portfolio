@@ -45,12 +45,17 @@ public class AnalysisService {
 
         EvidenceExtractor.ExtractionResult evidence = evidenceExtractor.extract(repo, accessToken);
 
-        // Persist full Phase 4 snapshot
+        // Persist full Phase 4 + Phase 7 snapshot
         RepoSnapshot snapshot = snapshotRepository.findByRepository(repo)
                 .orElseGet(() -> RepoSnapshot.builder().repository(repo).build());
         snapshot.setReadmeContent(evidence.readmeContent());
         snapshot.setDetectedStack(evidence.detectedStack());
-        snapshot.setExtractedSignals(evidence.signals());
+        // Merge commit signals into extracted_signals under a dedicated key
+        Map<String, Object> mergedSignals = new LinkedHashMap<>(evidence.signals());
+        if (!evidence.commitSignals().isEmpty()) {
+            mergedSignals.put("commitSignals", evidence.commitSignals());
+        }
+        snapshot.setExtractedSignals(mergedSignals);
         snapshot.setProjectType(evidence.projectType());
         snapshot.setParsedDependencies(evidence.parsedDependencies());
         snapshot.setQuantitativeMetrics(evidence.quantitativeMetrics());

@@ -160,6 +160,29 @@ public class LlmService {
                     + (targets.isEmpty() ? "" : ", deploys to: " + String.join(", ", targets)));
         }
 
+        // ── Commit history signals (Phase 7) ─────────────────────────────────
+        StringBuilder commitSection = new StringBuilder();
+        Map<String, Object> commitSignals = evidence.commitSignals();
+        if (!commitSignals.isEmpty()) {
+            Object messagesAnalyzed = commitSignals.get("messagesAnalyzed");
+            @SuppressWarnings("unchecked")
+            List<String> features = (List<String>) commitSignals.getOrDefault("detectedFeatures", List.of());
+            @SuppressWarnings("unchecked")
+            List<String> recentMsgs = (List<String>) commitSignals.getOrDefault("recentMessages", List.of());
+
+            if (messagesAnalyzed != null) {
+                commitSection.append("Commits analyzed: ").append(messagesAnalyzed).append("\n");
+            }
+            if (!features.isEmpty()) {
+                commitSection.append("Features detected from commit history: ")
+                        .append(String.join(", ", features)).append("\n");
+            }
+            if (!recentMsgs.isEmpty()) {
+                commitSection.append("Sample recent commits:\n");
+                recentMsgs.stream().limit(8).forEach(m -> commitSection.append("  • ").append(m).append("\n"));
+            }
+        }
+
         // ── Infrastructure signals ────────────────────────────────────────────
         StringBuilder infraSection = new StringBuilder();
         Map<String, String> infraLabels = new LinkedHashMap<>();
@@ -208,6 +231,10 @@ public class LlmService {
                 ═══════════════════════════════════════════
                 %s
                 ═══════════════════════════════════════════
+                COMMIT HISTORY SIGNALS — what was actually built over time:
+                ═══════════════════════════════════════════
+                %s
+                ═══════════════════════════════════════════
                 README (truncated):
                 ═══════════════════════════════════════════
                 %s
@@ -242,6 +269,7 @@ public class LlmService {
                   - Specific framework versions (Spring Boot 3.x, React 18, etc.)
                   - CI/CD pipeline stages, Docker multi-stage builds, DB migration tooling
                   - Performance/throughput/scale numbers scraped from README (these are gold — use them)
+                  - Features confirmed by commit history (auth, caching, real-time, etc.) — these prove the work actually happened
 
                 WHAT TO AVOID:
                   - File counts, line counts — these mean nothing to a senior engineer
@@ -282,6 +310,7 @@ public class LlmService {
                 metricsSection.toString().trim(),
                 depsSection.toString().trim(),
                 infraSection.toString().trim(),
+                commitSection.toString().trim().isEmpty() ? "No commit data available." : commitSection.toString().trim(),
                 readmeSnippet,
                 evidence.projectType()
         );
