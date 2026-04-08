@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import type { AnalysisJob, ContentBlock } from '../lib/api';
+import type { AnalysisJob, ContentBlock, ContentType } from '../lib/api';
 import { useCurrentUser } from '../hooks/useCurrentUser';
 
 // ── Copy button ───────────────────────────────────────────────────────────────
@@ -54,15 +54,25 @@ function ContentCard({
     setEditing(false);
   };
 
-  const labels: Record<string, string> = {
+  const labels: Record<ContentType, string> = {
     PORTFOLIO_SUMMARY: 'Portfolio Summary',
     RESUME_BULLETS: 'Resume Bullets',
     TECH_STACK: 'Tech Stack',
     PROJECT_TAGS: 'Project Tags',
+    ONE_SENTENCE_PITCH: 'One-Sentence Pitch',
+    TALKING_POINTS: 'Talking Points',
+    INTERVIEW_STORY: 'Interview Story',
+  };
+
+  const editRows: Partial<Record<ContentType, number>> = {
+    PORTFOLIO_SUMMARY: 4,
+    INTERVIEW_STORY: 14,
+    TALKING_POINTS: 10,
+    RESUME_BULLETS: 8,
   };
 
   const renderContent = () => {
-    if (block.contentType === 'RESUME_BULLETS') {
+    if (block.contentType === 'RESUME_BULLETS' || block.contentType === 'TALKING_POINTS') {
       const bullets = displayText.split('\n').filter(Boolean);
       return (
         <ul className="space-y-2">
@@ -84,6 +94,35 @@ function ContentCard({
               {item}
             </span>
           ))}
+        </div>
+      );
+    }
+    if (block.contentType === 'ONE_SENTENCE_PITCH') {
+      return (
+        <p className="text-gray-100 text-base font-medium leading-relaxed italic">
+          "{displayText}"
+        </p>
+      );
+    }
+    if (block.contentType === 'INTERVIEW_STORY') {
+      // Render each labeled section as its own block
+      const sections = displayText.split(/\n\n+/).filter(Boolean);
+      return (
+        <div className="space-y-4">
+          {sections.map((section, i) => {
+            const colonIdx = section.indexOf(':');
+            if (colonIdx !== -1) {
+              const label = section.slice(0, colonIdx).trim();
+              const body = section.slice(colonIdx + 1).trim();
+              return (
+                <div key={i}>
+                  <p className="text-xs font-semibold text-violet-400 uppercase tracking-wider mb-1">{label}</p>
+                  <p className="text-gray-300 text-sm leading-relaxed">{body}</p>
+                </div>
+              );
+            }
+            return <p key={i} className="text-gray-300 text-sm leading-relaxed">{section}</p>;
+          })}
         </div>
       );
     }
@@ -125,7 +164,7 @@ function ContentCard({
           <textarea
             value={draft}
             onChange={e => setDraft(e.target.value)}
-            rows={block.contentType === 'PORTFOLIO_SUMMARY' ? 4 : 8}
+            rows={editRows[block.contentType] ?? 6}
             className="w-full bg-gray-800 border border-gray-700 focus:border-violet-500 rounded-lg px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 resize-y outline-none transition-colors"
             autoFocus
           />
@@ -168,6 +207,16 @@ function ContentCard({
   );
 }
 
+// ── View toggle ───────────────────────────────────────────────────────────────
+
+type View = 'resume' | 'interview';
+
+const RESUME_TYPES: ContentType[] = ['PORTFOLIO_SUMMARY', 'RESUME_BULLETS', 'TECH_STACK', 'PROJECT_TAGS'];
+const INTERVIEW_TYPES: ContentType[] = ['ONE_SENTENCE_PITCH', 'TALKING_POINTS', 'INTERVIEW_STORY'];
+
+const RESUME_ORDER = ['PORTFOLIO_SUMMARY', 'RESUME_BULLETS', 'TECH_STACK', 'PROJECT_TAGS'];
+const INTERVIEW_ORDER = ['ONE_SENTENCE_PITCH', 'TALKING_POINTS', 'INTERVIEW_STORY'];
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ResultsPage() {
@@ -175,6 +224,7 @@ export default function ResultsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { data: user } = useCurrentUser();
+  const [view, setView] = useState<View>('resume');
 
   const { data: content = [], isLoading } = useQuery({
     queryKey: ['content', repoId],
@@ -182,10 +232,8 @@ export default function ResultsPage() {
     enabled: !!repoId,
   });
 
-  // Tracks the active reanalyze job for polling
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
 
-  // Poll the job until it completes, then refresh content
   useQuery({
     queryKey: ['reanalyzeJob', activeJobId],
     queryFn: () => api.jobs.get(activeJobId!),
@@ -209,7 +257,6 @@ export default function ResultsPage() {
     onSuccess: (job) => setActiveJobId(job.jobId),
   });
 
-  // Optimistically update edited text in the query cache
   const handleSaved = (contentId: string, newText: string) => {
     queryClient.setQueryData<ContentBlock[]>(['content', repoId], old =>
       old?.map(b =>
@@ -219,9 +266,14 @@ export default function ResultsPage() {
     queryClient.invalidateQueries({ queryKey: ['projects'] });
   };
 
-  const ORDER = ['PORTFOLIO_SUMMARY', 'RESUME_BULLETS', 'TECH_STACK', 'PROJECT_TAGS'];
-  const sorted = [...content].sort((a, b) => ORDER.indexOf(a.contentType) - ORDER.indexOf(b.contentType));
+  const activeTypes = view === 'resume' ? RESUME_TYPES : INTERVIEW_TYPES;
+  const activeOrder = view === 'resume' ? RESUME_ORDER : INTERVIEW_ORDER;
 
+  const visibleBlocks = content
+    .filter(b => activeTypes.includes(b.contentType))
+    .sort((a, b) => activeOrder.indexOf(a.contentType) - activeOrder.indexOf(b.contentType));
+
+  const hasInterviewContent = content.some(b => INTERVIEW_TYPES.includes(b.contentType));
   const editedCount = content.filter(b => b.isEdited).length;
 
   return (
@@ -243,7 +295,8 @@ export default function ResultsPage() {
       </header>
 
       <main className="max-w-3xl mx-auto px-6 py-8">
-        <div className="flex items-center justify-between mb-8">
+        {/* Title row */}
+        <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
             <button
               onClick={() => navigate('/workspace')}
@@ -277,6 +330,35 @@ export default function ResultsPage() {
           </button>
         </div>
 
+        {/* View toggle */}
+        {content.length > 0 && (
+          <div className="flex gap-1 p-1 bg-gray-900 border border-gray-800 rounded-lg w-fit mb-6">
+            <button
+              onClick={() => setView('resume')}
+              className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                view === 'resume'
+                  ? 'bg-violet-600 text-white'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Resume
+            </button>
+            <button
+              onClick={() => setView('interview')}
+              className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                view === 'interview'
+                  ? 'bg-violet-600 text-white'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Interview
+              {!hasInterviewContent && (
+                <span className="ml-1.5 text-[10px] text-gray-500">(re-analyze to generate)</span>
+              )}
+            </button>
+          </div>
+        )}
+
         {isLoading ? (
           <div className="text-center py-20 text-gray-500">Loading...</div>
         ) : content.length === 0 ? (
@@ -290,9 +372,20 @@ export default function ResultsPage() {
               {reanalyzeMutation.isPending ? 'Analyzing...' : 'Analyze Now'}
             </button>
           </div>
+        ) : visibleBlocks.length === 0 ? (
+          <div className="text-center py-16 text-gray-500">
+            <p className="mb-3">No interview content yet.</p>
+            <button
+              onClick={() => reanalyzeMutation.mutate()}
+              disabled={reanalyzeMutation.isPending || !!activeJobId}
+              className="px-5 py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-sm font-semibold text-white transition-colors disabled:opacity-50"
+            >
+              Re-analyze to generate
+            </button>
+          </div>
         ) : (
           <div className="space-y-4">
-            {sorted.map(block => (
+            {visibleBlocks.map(block => (
               <ContentCard
                 key={block.id}
                 block={block}
