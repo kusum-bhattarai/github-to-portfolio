@@ -89,13 +89,8 @@ export default function DashboardPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const analyzeMutation = useMutation({
-    mutationFn: async (ids: string[]) => {
-      // Analyze first selected repo and navigate to results
-      const firstId = ids[0];
-      await api.analysis.analyze(firstId);
-      return firstId;
-    },
-    onSuccess: (repoId) => navigate(`/results/${repoId}`),
+    mutationFn: (ids: string[]) => api.analysis.batch(ids),
+    onSuccess: () => navigate('/status'),
   });
 
   const languages = [...new Set(repos.map(r => r.primaryLanguage).filter(Boolean))].sort();

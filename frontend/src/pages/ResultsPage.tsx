@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import type { ContentBlock } from '../lib/api';
+import type { AnalysisJob, ContentBlock } from '../lib/api';
 import { useCurrentUser } from '../hooks/useCurrentUser';
 
 // ── Copy button ───────────────────────────────────────────────────────────────
@@ -182,12 +182,31 @@ export default function ResultsPage() {
     enabled: !!repoId,
   });
 
+  // Tracks the active reanalyze job for polling
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+
+  // Poll the job until it completes, then refresh content
+  useQuery({
+    queryKey: ['reanalyzeJob', activeJobId],
+    queryFn: () => api.jobs.get(activeJobId!),
+    enabled: !!activeJobId,
+    refetchInterval: (query) => {
+      const job = query.state.data as AnalysisJob | undefined;
+      if (!job || job.isActive) return 2000;
+      if (job.status === 'COMPLETED') {
+        queryClient.invalidateQueries({ queryKey: ['content', repoId] });
+        queryClient.invalidateQueries({ queryKey: ['projects'] });
+        setActiveJobId(null);
+      } else if (job.status === 'FAILED') {
+        setActiveJobId(null);
+      }
+      return false;
+    },
+  });
+
   const reanalyzeMutation = useMutation({
     mutationFn: () => api.analysis.analyze(repoId!),
-    onSuccess: data => {
-      queryClient.setQueryData(['content', repoId], data);
-      queryClient.invalidateQueries({ queryKey: ['projects'] });
-    },
+    onSuccess: (job) => setActiveJobId(job.jobId),
   });
 
   // Optimistically update edited text in the query cache
@@ -245,7 +264,7 @@ export default function ResultsPage() {
           </div>
           <button
             onClick={() => reanalyzeMutation.mutate()}
-            disabled={reanalyzeMutation.isPending}
+            disabled={reanalyzeMutation.isPending || !!activeJobId}
             className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
           >
             <svg
@@ -254,7 +273,7 @@ export default function ResultsPage() {
             >
               <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
-            {reanalyzeMutation.isPending ? 'Analyzing...' : 'Re-analyze'}
+            {(reanalyzeMutation.isPending || !!activeJobId) ? 'Analyzing...' : 'Re-analyze'}
           </button>
         </div>
 
@@ -265,7 +284,7 @@ export default function ResultsPage() {
             <p className="text-gray-400 mb-4">No content generated yet.</p>
             <button
               onClick={() => reanalyzeMutation.mutate()}
-              disabled={reanalyzeMutation.isPending}
+              disabled={reanalyzeMutation.isPending || !!activeJobId}
               className="px-6 py-3 bg-violet-600 hover:bg-violet-500 rounded-xl font-semibold transition-colors disabled:opacity-50"
             >
               {reanalyzeMutation.isPending ? 'Analyzing...' : 'Analyze Now'}
@@ -284,7 +303,7 @@ export default function ResultsPage() {
           </div>
         )}
 
-        {reanalyzeMutation.isPending && (
+        {(reanalyzeMutation.isPending || !!activeJobId) && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
             <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 text-center">
               <div className="w-8 h-8 border-2 border-violet-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />

@@ -42,7 +42,8 @@ public class EvidenceExtractor {
             Map<String, Object> signals,
             String projectType,
             Map<String, Object> parsedDependencies,
-            Map<String, Object> quantitativeMetrics
+            Map<String, Object> quantitativeMetrics,
+            Map<String, Object> commitSignals
     ) {}
 
     // ─── Main entry point ────────────────────────────────────────────────────
@@ -58,7 +59,7 @@ public class EvidenceExtractor {
 
         Map<String, Object> signals = detectSignals(tree, repo);
         Map<String, Object> parsedDeps = parseConfigFiles(owner, repoName, accessToken, tree, signals);
-        Map<String, Object> metrics = fetchQuantitativeMetrics(owner, repoName, accessToken, tree);
+        Map<String, Object> metrics = fetchQuantitativeMetrics(owner, repoName, accessToken, tree, readme);
         List<String> stack = buildStack(repo, signals, parsedDeps);
         String projectType = classifyProjectType(repo, signals, parsedDeps, stack);
 
@@ -538,53 +539,152 @@ public class EvidenceExtractor {
     // ─── Quantitative metrics ─────────────────────────────────────────────────
 
     private Map<String, Object> fetchQuantitativeMetrics(
-            String owner, String repoName, String token, List<Map<String, Object>> tree) {
+            String owner, String repoName, String token,
+            List<Map<String, Object>> tree, String readme) {
 
         Map<String, Object> metrics = new LinkedHashMap<>();
 
-        // Test file count from tree
-        long testFileCount = tree.stream()
+        // ── Class-level counts (more meaningful than raw file counts) ─────────
+
+        // Test class count
+        long testClassCount = tree.stream()
                 .map(n -> ((String) n.getOrDefault("path", "")).toLowerCase())
-                .filter(p -> p.contains("test") || p.contains("spec") || p.contains("__tests__"))
                 .filter(p -> !p.contains("node_modules"))
+                .filter(p -> (p.contains("test") || p.contains("spec") || p.contains("__tests__"))
+                        && (p.endsWith(".java") || p.endsWith(".py") || p.endsWith(".ts")
+                            || p.endsWith(".tsx") || p.endsWith(".js") || p.endsWith(".jsx")
+                            || p.endsWith(".go") || p.endsWith(".rs")))
                 .count();
-        metrics.put("testFileCount", testFileCount);
+        if (testClassCount > 0) metrics.put("testClassCount", testClassCount);
 
-        // Total file count
-        long fileCount = tree.stream()
-                .filter(n -> "blob".equals(n.get("type")))
-                .count();
-        metrics.put("totalFiles", fileCount);
-
-        // Directory depth (max nesting level)
-        int maxDepth = tree.stream()
+        // Entity / model class count
+        long entityClassCount = tree.stream()
                 .map(n -> (String) n.getOrDefault("path", ""))
-                .mapToInt(p -> p.split("/").length)
-                .max().orElse(1);
-        metrics.put("maxDirectoryDepth", maxDepth);
+                .filter(p -> {
+                    String lower = p.toLowerCase();
+                    return (lower.contains("/entity/") || lower.contains("/entities/")
+                            || lower.contains("/model/") || lower.contains("/models/")
+                            || lower.contains("/domain/"))
+                            && (lower.endsWith(".java") || lower.endsWith(".kt")
+                                || lower.endsWith(".py") || lower.endsWith(".ts"));
+                })
+                .count();
+        if (entityClassCount > 0) metrics.put("entityClassCount", entityClassCount);
 
-        // Commit count via GitHub API (Link header pagination trick)
+        // Controller / handler class count
+        long controllerClassCount = tree.stream()
+                .map(n -> (String) n.getOrDefault("path", ""))
+                .filter(p -> {
+                    String lower = p.toLowerCase();
+                    return (lower.contains("/controller/") || lower.contains("/controllers/")
+                            || lower.contains("/handler/") || lower.contains("/handlers/")
+                            || lower.contains("/router/") || lower.contains("/routes/")
+                            || lower.contains("/views/"))
+                            && (lower.endsWith(".java") || lower.endsWith(".kt")
+                                || lower.endsWith(".py") || lower.endsWith(".ts")
+                                || lower.endsWith(".go"));
+                })
+                .count();
+        if (controllerClassCount > 0) metrics.put("controllerClassCount", controllerClassCount);
+
+        // Service class count
+        long serviceClassCount = tree.stream()
+                .map(n -> (String) n.getOrDefault("path", ""))
+                .filter(p -> {
+                    String lower = p.toLowerCase();
+                    return (lower.contains("/service/") || lower.contains("/services/")
+                            || lower.contains("/usecase/") || lower.contains("/usecases/"))
+                            && (lower.endsWith(".java") || lower.endsWith(".kt")
+                                || lower.endsWith(".py") || lower.endsWith(".ts")
+                                || lower.endsWith(".go"));
+                })
+                .count();
+        if (serviceClassCount > 0) metrics.put("serviceClassCount", serviceClassCount);
+
+        // ── GitHub API metrics ────────────────────────────────────────────────
         metrics.put("commitCount", fetchCommitCount(owner, repoName, token));
-
-        // Contributor count
         metrics.put("contributorCount", fetchContributorCount(owner, repoName, token));
 
-        // Language breakdown in bytes
+        // Language breakdown in bytes (for % breakdown in prompt)
         Map<String, Object> langBytes = fetchLanguageBreakdown(owner, repoName, token);
         metrics.put("languageBytes", langBytes);
 
-        // Estimated total lines of code (~40 bytes per line average)
-        long totalBytes = langBytes.values().stream()
-                .mapToLong(v -> v instanceof Number ? ((Number) v).longValue() : 0)
-                .sum();
-        metrics.put("estimatedLinesOfCode", totalBytes / 40);
+        // ── README-scraped metrics ────────────────────────────────────────────
+        if (!readme.isBlank()) {
+            Map<String, Object> readmeMetrics = extractReadmeMetrics(readme);
+            if (!readmeMetrics.isEmpty()) metrics.put("readmeMetrics", readmeMetrics);
+        }
 
-        log.debug("Quantitative metrics for {}/{}: {} commits, {} contributors, {} files, {} test files",
+        log.debug("Quantitative metrics for {}/{}: {} commits, {} contributors, {} test classes, {} entities",
                 owner, repoName,
                 metrics.get("commitCount"), metrics.get("contributorCount"),
-                fileCount, testFileCount);
+                testClassCount, entityClassCount);
 
         return metrics;
+    }
+
+    /**
+     * Scrapes the README for concrete numbers that strengthen resume bullets:
+     * test coverage %, response time/latency, throughput, scale indicators.
+     */
+    private Map<String, Object> extractReadmeMetrics(String readme) {
+        Map<String, Object> found = new LinkedHashMap<>();
+        String text = readme.toLowerCase();
+
+        // Test coverage percentage — "87% coverage", "coverage: 87%", badge text
+        var coveragePattern = java.util.regex.Pattern.compile(
+                "(\\d{1,3}(?:\\.\\d+)?)\\s*%\\s*(?:test\\s+)?coverage|" +
+                "coverage[:\\s]+([\\d]{1,3}(?:\\.\\d+)?)\\s*%|" +
+                "codecov[^\\n]*?(\\d{1,3})%|" +
+                "passing.*?(\\d{1,3})%",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        var coverageMatcher = coveragePattern.matcher(readme);
+        if (coverageMatcher.find()) {
+            for (int g = 1; g <= coverageMatcher.groupCount(); g++) {
+                if (coverageMatcher.group(g) != null) {
+                    found.put("testCoveragePercent", coverageMatcher.group(g) + "%");
+                    break;
+                }
+            }
+        }
+
+        // Response time / latency — "< 200ms", "50ms response", "p99 latency: 120ms"
+        var latencyPattern = java.util.regex.Pattern.compile(
+                "(?:p\\d{2,3}\\s+latency[:\\s]+)?<?\\s*(\\d+(?:\\.\\d+)?)\\s*ms\\b",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        var latencyMatcher = latencyPattern.matcher(readme);
+        if (latencyMatcher.find()) {
+            found.put("responseTimeMs", latencyMatcher.group(1) + "ms");
+        }
+
+        // Throughput / requests per second
+        var rpsPattern = java.util.regex.Pattern.compile(
+                "(\\d+[kKmM]?)\\s*(?:req(?:uests?)?/s|rps|requests per second)",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        var rpsMatcher = rpsPattern.matcher(readme);
+        if (rpsMatcher.find()) {
+            found.put("throughput", rpsMatcher.group(1) + " req/s");
+        }
+
+        // Scale — "1000+ users", "10k records", "handles N requests"
+        var scalePattern = java.util.regex.Pattern.compile(
+                "(\\d+[kKmMbB]?\\+?)\\s*(?:users?|customers?|requests?|records?|transactions?|operations?)",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        var scaleMatcher = scalePattern.matcher(readme);
+        if (scaleMatcher.find()) {
+            found.put("scaleIndicator", scaleMatcher.group(0).trim());
+        }
+
+        // API endpoint count — "15 endpoints", "20+ API routes"
+        var endpointPattern = java.util.regex.Pattern.compile(
+                "(\\d+)\\s*(?:\\+\\s*)?(?:REST\\s+|API\\s+)?endpoints?",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        var endpointMatcher = endpointPattern.matcher(readme);
+        if (endpointMatcher.find()) {
+            found.put("apiEndpointCount", endpointMatcher.group(1) + " endpoints");
+        }
+
+        return found;
     }
 
     private int fetchCommitCount(String owner, String repo, String token) {

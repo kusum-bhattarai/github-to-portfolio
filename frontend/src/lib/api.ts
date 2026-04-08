@@ -42,6 +42,21 @@ export interface ProjectSummary {
   portfolioSummary: string | null;
 }
 
+export type JobStatus = 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'RETRYING';
+
+export interface AnalysisJob {
+  jobId: string;
+  repoId: string;
+  repoName: string;
+  repoFullName?: string;
+  status: JobStatus;
+  isActive: boolean;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  errorMessage: string | null;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, { credentials: 'include', ...options });
   if (!res.ok) {
@@ -59,8 +74,20 @@ export const api = {
     sync: () => request<Repo[]>('/api/repos/sync', { method: 'POST' }),
   },
   analysis: {
-    analyze: (repoId: string) => request<ContentBlock[]>(`/api/repos/${repoId}/analyze`, { method: 'POST' }),
+    // Single repo — used for reanalyze from ResultsPage
+    analyze: (repoId: string) => request<AnalysisJob>(`/api/repos/${repoId}/analyze`, { method: 'POST' }),
+    // Batch — used from Dashboard for multiple repos
+    batch: (repoIds: string[]) =>
+      request<AnalysisJob[]>('/api/repos/analyze/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repoIds }),
+      }),
     getContent: (repoId: string) => request<ContentBlock[]>(`/api/projects/${repoId}/content`),
+  },
+  jobs: {
+    get: (jobId: string) => request<AnalysisJob>(`/api/jobs/${jobId}`),
+    list: () => request<AnalysisJob[]>('/api/jobs'),
   },
   projects: {
     list: () => request<ProjectSummary[]>('/api/projects'),

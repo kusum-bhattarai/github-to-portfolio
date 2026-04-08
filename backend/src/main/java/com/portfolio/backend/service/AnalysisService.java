@@ -21,6 +21,7 @@ public class AnalysisService {
     private final GeneratedContentRepository generatedContentRepository;
     private final EditedContentRepository editedContentRepository;
     private final GitHubConnectionRepository connectionRepository;
+    private final UserRepository userRepository;
     private final TokenEncryptionService tokenEncryptionService;
     private final EvidenceExtractor evidenceExtractor;
     private final LlmService llmService;
@@ -71,6 +72,16 @@ public class AnalysisService {
         generatedContentRepository.saveAll(results);
         log.info("Analysis complete for repo: {}", repo.getFullName());
         return results;
+    }
+
+    /**
+     * Variant used by the async worker — loads User from DB since there is no HTTP session context.
+     */
+    @Transactional
+    public List<GeneratedContent> analyzeById(UUID repositoryId, UUID userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new IllegalStateException("User not found: " + userId));
+        return analyze(repositoryId, user);
     }
 
     // ── Content retrieval ─────────────────────────────────────────────────────

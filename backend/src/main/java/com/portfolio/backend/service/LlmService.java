@@ -66,13 +66,21 @@ public class LlmService {
         // ── Quantitative metrics section ─────────────────────────────────────
         StringBuilder metricsSection = new StringBuilder();
         appendMetric(metricsSection, "Project type", evidence.projectType());
-        appendMetric(metricsSection, "Total source files", metrics.get("totalFiles"));
-        appendMetric(metricsSection, "Test files", metrics.get("testFileCount"));
-        appendMetric(metricsSection, "Estimated lines of code", metrics.get("estimatedLinesOfCode"));
+        appendMetric(metricsSection, "Entity / model classes", metrics.get("entityClassCount"));
+        appendMetric(metricsSection, "Controller / handler classes", metrics.get("controllerClassCount"));
+        appendMetric(metricsSection, "Service classes", metrics.get("serviceClassCount"));
+        appendMetric(metricsSection, "Test classes", metrics.get("testClassCount"));
         appendMetric(metricsSection, "Total commits", metrics.get("commitCount"));
         appendMetric(metricsSection, "Contributors", metrics.get("contributorCount"));
         appendMetric(metricsSection, "Stars / Forks", repo.getStars() + " / " + repo.getForks());
-        appendMetric(metricsSection, "Max directory depth", metrics.get("maxDirectoryDepth"));
+
+        // README-scraped metrics — these are the most valuable for bullets
+        Map<String, Object> readmeMetrics = (Map<String, Object>) metrics.getOrDefault("readmeMetrics", Map.of());
+        appendMetric(metricsSection, "Test coverage", readmeMetrics.get("testCoveragePercent"));
+        appendMetric(metricsSection, "Response time", readmeMetrics.get("responseTimeMs"));
+        appendMetric(metricsSection, "Throughput", readmeMetrics.get("throughput"));
+        appendMetric(metricsSection, "Scale", readmeMetrics.get("scaleIndicator"));
+        appendMetric(metricsSection, "API endpoints", readmeMetrics.get("apiEndpointCount"));
 
         // Language breakdown percentages
         Object langBytesObj = metrics.get("languageBytes");
@@ -129,7 +137,6 @@ public class LlmService {
 
         if (deps.containsKey("docker")) {
             Map<String, Object> docker = (Map<String, Object>) deps.get("docker");
-            @SuppressWarnings("unchecked")
             List<Object> baseImages = (List<Object>) docker.getOrDefault("baseImages", List.of());
             if (Boolean.TRUE.equals(docker.get("isMultiStage"))) {
                 String imageList = baseImages.stream().limit(3).map(Object::toString).collect(Collectors.joining(", "));
@@ -181,16 +188,15 @@ public class LlmService {
                 : evidence.readmeContent().substring(0, Math.min(evidence.readmeContent().length(), 1200));
 
         return """
-                You are a senior software engineer at a top tech company helping a developer craft
-                exceptional portfolio content. Your goal is to produce resume bullets and summaries
-                that would genuinely impress a FAANG hiring manager or senior engineer.
+                You are a staff engineer at a top tech company writing resume bullets for a developer's portfolio.
+                Your bullets will be read by FAANG recruiters and senior engineers who reject anything generic.
 
                 REPOSITORY: %s
                 Description: %s
                 Detected stack: %s
 
                 ═══════════════════════════════════════════
-                QUANTITATIVE METRICS (use these in bullets):
+                CONCRETE METRICS — embed these in bullets:
                 ═══════════════════════════════════════════
                 %s
                 ═══════════════════════════════════════════
@@ -214,27 +220,61 @@ public class LlmService {
                   "projectTags": ["Tag1", "Tag2"]
                 }
 
-                STRICT RULES FOR RESUME BULLETS:
-                - Write EXACTLY 4 bullets
-                - Start each with a strong action verb: Architected, Engineered, Implemented, Designed, Built, Developed, Optimized, Reduced, Increased, Automated
-                - ALWAYS include at least 2 concrete numbers from the metrics above (commit count, contributor count, LOC, dependency count, file count, test count, etc.)
-                - Mention the most impressive technical decisions: multi-stage Docker builds, CI/CD stages, DB migration tooling, architectural patterns, specific framework versions
-                - Write at the level of a new grad at a top tech company — specific, non-generic, technically rigorous
-                - Bad example: "Built a web application with React and Spring Boot"
-                - Good example: "Engineered a full-stack portfolio analytics platform across 3 architectural layers (controller/service/repository) with Spring Boot 3.2, reducing manual portfolio effort by automating content generation for %d+ repositories"
+                ═══════════════════════════════════════════
+                RESUME BULLET RULES — read carefully:
+                ═══════════════════════════════════════════
 
-                RULES FOR portfolioSummary:
-                - 2-3 sentences, professional tone
-                - Mention the project type (%s), the core technical challenge solved, and 1-2 scale/scope indicators from the metrics
-                - Do not use the word "leveraging" or "utilizing"
+                Write EXACTLY 4 bullets using Google's XYZ format:
+                  "Accomplished [X] as measured by [Y], by doing [Z]"
+                  X = the outcome or capability delivered
+                  Y = a concrete metric (classes, endpoints, coverage %%, commits, contributors, latency, throughput, or scale from README)
+                  Z = the specific technical approach, pattern, or architecture decision
 
-                RULES FOR techStack:
-                - Only include technologies confirmed by dependency analysis above — no hallucination
-                - Use canonical names with versions where available (e.g., "Spring Boot 3.2", "React 18")
+                STRONG action verbs (pick different ones per bullet):
+                  Architected, Engineered, Designed, Implemented, Built, Automated, Reduced, Increased, Optimized
 
-                RULES FOR projectTags:
-                - Pick 2-3 from: Full Stack, Backend, Frontend, DevOps, ML/AI, CLI Tool, API, Mobile, Library
-                - Must match the project type: %s
+                WHAT to mention (use what's available from the metrics above):
+                  - Entity/model class count → scope of data model
+                  - Controller/service class count → architectural depth
+                  - Test class count or coverage %% → quality signal
+                  - Commit count → project maturity and iteration history
+                  - Contributor count → collaboration (if > 1)
+                  - Specific framework versions (Spring Boot 3.x, React 18, etc.)
+                  - CI/CD pipeline stages, Docker multi-stage builds, DB migration tooling
+                  - Performance/throughput/scale numbers scraped from README (these are gold — use them)
+
+                WHAT TO AVOID:
+                  - File counts, line counts — these mean nothing to a senior engineer
+                  - Vague scope ("a web application", "a REST API", "a backend system")
+                  - Passive language ("was used to", "is capable of")
+                  - The words "leveraging", "utilizing", "robust", "scalable", "efficient"
+
+                EXAMPLES — bad vs. good:
+                  BAD:  "Built a web app with React and Spring Boot that handles user authentication"
+                  GOOD: "Engineered full-stack authentication flow across 4 Spring Security filter layers with OAuth2/GitHub SSO, eliminating manual credential management for all users"
+
+                  BAD:  "Implemented a REST API with multiple endpoints"
+                  GOOD: "Designed a 3-tier REST API (controller → service → repository) spanning 6 entity classes and 12 endpoints, with Flyway-managed schema versioning across 5 migrations"
+
+                  BAD:  "Added tests to the project"
+                  GOOD: "Achieved 87%% test coverage across 14 JUnit 5 test classes using Mockito, catching 3 integration regressions before production"
+
+                ═══════════════════════════════════════════
+                OTHER FIELD RULES:
+                ═══════════════════════════════════════════
+
+                portfolioSummary:
+                  - 2-3 sentences, written for a technical recruiter at a top company
+                  - State: what it does, who it's for, and one concrete architectural or scale fact
+                  - Do NOT use "leveraging", "utilizing", "robust", "scalable", or "modern"
+
+                techStack:
+                  - Only technologies confirmed by the dependency analysis — no hallucination
+                  - Include versions where detected (e.g., "Spring Boot 3.2", "React 18.x")
+
+                projectTags:
+                  - 2-3 from: Full Stack, Backend, Frontend, DevOps, ML/AI, CLI Tool, API, Mobile, Library
+                  - Must match project type: %s
                 """.formatted(
                 repo.getName(),
                 repo.getDescription() != null ? repo.getDescription() : "No description provided",
@@ -243,8 +283,6 @@ public class LlmService {
                 depsSection.toString().trim(),
                 infraSection.toString().trim(),
                 readmeSnippet,
-                metrics.getOrDefault("commitCount", 0),
-                evidence.projectType(),
                 evidence.projectType()
         );
     }
