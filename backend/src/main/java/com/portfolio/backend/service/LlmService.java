@@ -36,7 +36,10 @@ public class LlmService {
             String portfolioSummary,
             List<String> resumeBullets,
             List<String> techStack,
-            List<String> projectTags
+            List<String> projectTags,
+            String interviewStory,
+            String oneLinePitch,
+            List<String> talkingPoints
     ) {}
 
     public GeneratedPortfolioContent generate(Repository repo, EvidenceExtractor.ExtractionResult evidence) {
@@ -244,7 +247,10 @@ public class LlmService {
                   "portfolioSummary": "2-3 sentence professional description",
                   "resumeBullets": ["bullet 1", "bullet 2", "bullet 3", "bullet 4"],
                   "techStack": ["Tech1", "Tech2"],
-                  "projectTags": ["Tag1", "Tag2"]
+                  "projectTags": ["Tag1", "Tag2"],
+                  "oneLinePitch": "One sentence. Under 20 words. Used for LinkedIn / cold outreach.",
+                  "talkingPoints": ["point 1", "point 2", "point 3", "point 4", "point 5"],
+                  "interviewStory": "Purpose: ...\\n\\nArchitecture: ...\\n\\nKey Challenge: ...\\n\\nTradeoff: ...\\n\\nFuture: ..."
                 }
 
                 ═══════════════════════════════════════════
@@ -303,6 +309,24 @@ public class LlmService {
                 projectTags:
                   - 2-3 from: Full Stack, Backend, Frontend, DevOps, ML/AI, CLI Tool, API, Mobile, Library
                   - Must match project type: %s
+
+                oneLinePitch:
+                  - Single sentence, under 20 words, punchy enough for a LinkedIn headline or cold email
+                  - Lead with the value or capability, not the tech stack
+
+                talkingPoints:
+                  - 5 bullet points, each 1-2 sentences
+                  - Cover: what it does, a key architectural decision, one interesting challenge, a tradeoff made, and what you would do differently
+                  - These are what you say out loud in an interview — conversational but technically precise
+
+                interviewStory:
+                  - Five labeled sections separated by \\n\\n:
+                    Purpose: [What problem does this solve and for whom? 2 sentences max.]
+                    Architecture: [The key design decisions — layers, patterns, data flow. 2-3 sentences.]
+                    Key Challenge: [The hardest technical problem encountered. Be specific — name the failure mode, the debug process, or the constraint. 2-3 sentences.]
+                    Tradeoff: [One decision where you chose X over Y. Name both options and explain why. 2 sentences.]
+                    Future: [What you would build next or do differently now. 1-2 sentences.]
+                  - Write like you are speaking to a senior engineer in a loop interview, not writing documentation
                 """.formatted(
                 repo.getName(),
                 repo.getDescription() != null ? repo.getDescription() : "No description provided",
@@ -330,10 +354,13 @@ public class LlmService {
             List<String> bullets = objectMapper.convertValue(node.path("resumeBullets"), listType);
             List<String> stack = objectMapper.convertValue(node.path("techStack"), listType);
             List<String> tags = objectMapper.convertValue(node.path("projectTags"), listType);
-            return new GeneratedPortfolioContent(summary, bullets, stack, tags);
+            String interviewStory = node.path("interviewStory").asText("");
+            String oneLinePitch = node.path("oneLinePitch").asText("");
+            List<String> talkingPoints = objectMapper.convertValue(node.path("talkingPoints"), listType);
+            return new GeneratedPortfolioContent(summary, bullets, stack, tags, interviewStory, oneLinePitch, talkingPoints);
         } catch (Exception e) {
             log.error("Failed to parse LLM response: {}", json, e);
-            return new GeneratedPortfolioContent("Failed to generate content.", List.of(), List.of(), List.of());
+            return new GeneratedPortfolioContent("Failed to generate content.", List.of(), List.of(), List.of(), "", "", List.of());
         }
     }
 }
