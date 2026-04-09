@@ -12,17 +12,21 @@ import java.util.concurrent.CompletableFuture;
 /**
  * Background worker for repository analysis.
  *
- * Runs on the "analysisExecutor" thread pool. On transient failure the job
- * transitions to RETRYING, waits 5 s, then attempts once more before marking
- * it FAILED. All state transitions are mirrored to both Redis (fast polling)
- * and PostgreSQL (durability).
+ * Runs on the "analysisExecutor" thread pool.
+ *
+ * Retry strategy: exponential backoff with up to MAX_ATTEMPTS total attempts.
+ * Delays: 2s → 4s → 8s (doubles each retry, capped at MAX_BACKOFF_MS).
+ * All state transitions are mirrored to both Redis (fast polling) and
+ * PostgreSQL (durability).
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class AsyncAnalysisWorker {
 
-    private static final int RETRY_DELAY_MS = 5_000;
+    private static final int MAX_ATTEMPTS   = 3;
+    private static final long BASE_DELAY_MS = 2_000;
+    private static final long MAX_BACKOFF_MS = 30_000;
 
     private final AnalysisService analysisService;
     private final JobStateService jobStateService;
@@ -32,36 +36,42 @@ public class AsyncAnalysisWorker {
         log.info("Worker starting — jobId={} repoId={}", jobId, repositoryId);
         jobStateService.transition(jobId, JobStatus.PROCESSING);
 
-        try {
-            analysisService.analyzeById(repositoryId, userId);
-            jobStateService.transition(jobId, JobStatus.COMPLETED);
-            log.info("Worker completed — jobId={}", jobId);
+        Exception lastException = null;
 
-        } catch (Exception firstException) {
-            log.warn("Worker first attempt failed — jobId={}: {}", jobId, firstException.getMessage());
-            jobStateService.transition(jobId, JobStatus.RETRYING);
-
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
-                Thread.sleep(RETRY_DELAY_MS);
-                log.info("Worker retrying — jobId={}", jobId);
-                jobStateService.transition(jobId, JobStatus.PROCESSING);
-
                 analysisService.analyzeById(repositoryId, userId);
                 jobStateService.transition(jobId, JobStatus.COMPLETED);
-                log.info("Worker completed on retry — jobId={}", jobId);
+                log.info("Worker completed — jobId={} attempt={}", jobId, attempt);
+                return CompletableFuture.completedFuture(null);
 
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                jobStateService.transition(jobId, JobStatus.FAILED, "Worker thread interrupted");
+            } catch (Exception e) {
+                lastException = e;
+                log.warn("Worker attempt {}/{} failed — jobId={}: {}", attempt, MAX_ATTEMPTS, jobId, e.getMessage());
 
-            } catch (Exception retryException) {
-                log.error("Worker retry failed — jobId={}: {}", jobId, retryException.getMessage());
-                String errorMsg = retryException.getMessage() != null
-                        ? retryException.getMessage().substring(0, Math.min(retryException.getMessage().length(), 500))
-                        : "Unknown error";
-                jobStateService.transition(jobId, JobStatus.FAILED, errorMsg);
+                if (attempt < MAX_ATTEMPTS) {
+                    long delayMs = Math.min(BASE_DELAY_MS * (1L << (attempt - 1)), MAX_BACKOFF_MS);
+                    log.info("Worker backing off {}ms before retry — jobId={}", delayMs, jobId);
+                    jobStateService.transition(jobId, JobStatus.RETRYING);
+
+                    try {
+                        Thread.sleep(delayMs);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        jobStateService.transition(jobId, JobStatus.FAILED, "Worker thread interrupted");
+                        return CompletableFuture.completedFuture(null);
+                    }
+
+                    jobStateService.transition(jobId, JobStatus.PROCESSING);
+                }
             }
         }
+
+        String errorMsg = lastException != null && lastException.getMessage() != null
+                ? lastException.getMessage().substring(0, Math.min(lastException.getMessage().length(), 500))
+                : "Unknown error after " + MAX_ATTEMPTS + " attempts";
+        log.error("Worker exhausted all {} attempts — jobId={}: {}", MAX_ATTEMPTS, jobId, errorMsg);
+        jobStateService.transition(jobId, JobStatus.FAILED, errorMsg);
 
         return CompletableFuture.completedFuture(null);
     }
