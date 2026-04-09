@@ -13,13 +13,17 @@ import com.portfolio.backend.repository.UserRepository;
 import com.portfolio.backend.service.AnalysisService;
 import com.portfolio.backend.service.AsyncAnalysisWorker;
 import com.portfolio.backend.service.JobStateService;
+import com.portfolio.backend.service.RateLimitService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
 
+@Slf4j
 @RestController
 @RequestMapping("/api")
 @RequiredArgsConstructor
@@ -32,6 +36,7 @@ public class AnalysisController {
     private final RepositoryRepository repositoryRepository;
     private final EditedContentRepository editedContentRepository;
     private final UserRepository userRepository;
+    private final RateLimitService rateLimitService;
 
     // ── Single repo analyze (reanalyze from ResultsPage) ─────────────────────
 
@@ -63,6 +68,11 @@ public class AnalysisController {
 
         return resolveUser(auth)
                 .map(user -> {
+                    if (!rateLimitService.allowAnalysis(user.getId())) {
+                        log.warn("Rate limit exceeded for user {}", user.getId());
+                        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                                .<Object>body(Map.of("error", "Analysis rate limit exceeded. Try again later."));
+                    }
                     List<Map<String, Object>> jobs = new ArrayList<>();
                     for (String idStr : repoIdStrings) {
                         try {
@@ -127,6 +137,14 @@ public class AnalysisController {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private AnalysisJob submitJob(User user, Repository repo) {
+        // Idempotency — return existing active job rather than creating a duplicate
+        Optional<AnalysisJob> active = jobRepository.findActiveJobForRepo(
+                repo, List.of(JobStatus.COMPLETED, JobStatus.FAILED));
+        if (active.isPresent()) {
+            log.info("Returning existing active job {} for repo {}", active.get().getId(), repo.getFullName());
+            return active.get();
+        }
+
         AnalysisJob job = AnalysisJob.builder()
                 .user(user)
                 .repository(repo)
