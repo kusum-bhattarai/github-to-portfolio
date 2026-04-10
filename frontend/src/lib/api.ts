@@ -70,7 +70,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, { credentials: 'include', ...options });
   if (!res.ok) {
     const err = new Error(`HTTP ${res.status}`);
-    (err as any).status = res.status;
+    (err as Error & { status: number }).status = res.status;
     throw err;
   }
   return res.json();
