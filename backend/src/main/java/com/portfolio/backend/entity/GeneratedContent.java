@@ -41,6 +41,9 @@ public class GeneratedContent {
         PORTFOLIO_SUMMARY,
         RESUME_BULLETS,
         TECH_STACK,
-        PROJECT_TAGS
+        PROJECT_TAGS,
+        INTERVIEW_STORY,
+        ONE_SENTENCE_PITCH,
+        TALKING_POINTS
     }
 }

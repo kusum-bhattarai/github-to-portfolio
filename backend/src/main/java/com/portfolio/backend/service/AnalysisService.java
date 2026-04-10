@@ -67,12 +67,18 @@ public class AnalysisService {
         // Clear old generated content AND any edits (cascades via FK)
         generatedContentRepository.deleteByRepository(repo);
 
-        List<GeneratedContent> results = List.of(
+        List<GeneratedContent> results = new ArrayList<>(List.of(
                 buildContent(repo, Type.PORTFOLIO_SUMMARY, generated.portfolioSummary()),
                 buildContent(repo, Type.RESUME_BULLETS, String.join("\n", generated.resumeBullets())),
                 buildContent(repo, Type.TECH_STACK, String.join(", ", generated.techStack())),
                 buildContent(repo, Type.PROJECT_TAGS, String.join(", ", generated.projectTags()))
-        );
+        ));
+        if (!generated.oneLinePitch().isBlank())
+            results.add(buildContent(repo, Type.ONE_SENTENCE_PITCH, generated.oneLinePitch()));
+        if (!generated.talkingPoints().isEmpty())
+            results.add(buildContent(repo, Type.TALKING_POINTS, String.join("\n", generated.talkingPoints())));
+        if (!generated.interviewStory().isBlank())
+            results.add(buildContent(repo, Type.INTERVIEW_STORY, generated.interviewStory()));
 
         generatedContentRepository.saveAll(results);
         log.info("Analysis complete for repo: {}", repo.getFullName());

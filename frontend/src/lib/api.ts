@@ -19,9 +19,18 @@ export interface Repo {
   htmlUrl: string;
 }
 
+export type ContentType =
+  | 'PORTFOLIO_SUMMARY'
+  | 'RESUME_BULLETS'
+  | 'TECH_STACK'
+  | 'PROJECT_TAGS'
+  | 'INTERVIEW_STORY'
+  | 'ONE_SENTENCE_PITCH'
+  | 'TALKING_POINTS';
+
 export interface ContentBlock {
   id: string;
-  contentType: 'PORTFOLIO_SUMMARY' | 'RESUME_BULLETS' | 'TECH_STACK' | 'PROJECT_TAGS';
+  contentType: ContentType;
   generatedText: string;
   editedText: string | null;
   isEdited: boolean;
