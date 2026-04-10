@@ -29,10 +29,21 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+export interface ContentBlock {
+  id: string;
+  contentType: 'PORTFOLIO_SUMMARY' | 'RESUME_BULLETS' | 'TECH_STACK' | 'PROJECT_TAGS';
+  generatedText: string;
+  createdAt: string;
+}
+
 export const api = {
   me: () => request<CurrentUser>('/api/me'),
   repos: {
     list: () => request<Repo[]>('/api/repos'),
     sync: () => request<Repo[]>('/api/repos/sync', { method: 'POST' }),
+  },
+  analysis: {
+    analyze: (repoId: string) => request<ContentBlock[]>(`/api/repos/${repoId}/analyze`, { method: 'POST' }),
+    getContent: (repoId: string) => request<ContentBlock[]>(`/api/projects/${repoId}/content`),
   },
 };

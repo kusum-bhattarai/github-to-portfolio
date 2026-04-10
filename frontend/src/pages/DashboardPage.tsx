@@ -1,6 +1,9 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useMutation } from '@tanstack/react-query';
 import { useCurrentUser } from '../hooks/useCurrentUser';
 import { useRepos, useSyncRepos } from '../hooks/useRepos';
+import { api } from '../lib/api';
 import type { Repo } from '../lib/api';
 
 const LANGUAGE_COLORS: Record<string, string> = {
@@ -80,9 +83,20 @@ export default function DashboardPage() {
   const { data: repos = [], isLoading: reposLoading } = useRepos();
   const syncMutation = useSyncRepos();
 
+  const navigate = useNavigate();
   const [search, setSearch] = useState('');
   const [langFilter, setLangFilter] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const analyzeMutation = useMutation({
+    mutationFn: async (ids: string[]) => {
+      // Analyze first selected repo and navigate to results
+      const firstId = ids[0];
+      await api.analysis.analyze(firstId);
+      return firstId;
+    },
+    onSuccess: (repoId) => navigate(`/results/${repoId}`),
+  });
 
   const languages = [...new Set(repos.map(r => r.primaryLanguage).filter(Boolean))].sort();
 
@@ -160,9 +174,11 @@ export default function DashboardPage() {
             </select>
             {selected.size > 0 && (
               <button
-                className="px-4 py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-sm font-semibold transition-colors"
+                onClick={() => analyzeMutation.mutate([...selected])}
+                disabled={analyzeMutation.isPending}
+                className="px-4 py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50"
               >
-                Analyze {selected.size} repo{selected.size > 1 ? 's' : ''}
+                {analyzeMutation.isPending ? 'Analyzing...' : `Analyze ${selected.size} repo${selected.size > 1 ? 's' : ''}`}
               </button>
             )}
           </div>
