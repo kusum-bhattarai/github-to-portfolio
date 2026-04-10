@@ -1,0 +1,113 @@
+spring:
+  application:
+    name: github-portfolio-backend
+  config:
+    import: "optional:file:.env"
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/portfolio
+    username: portfolio
+    password: ${POSTGRES_PASSWORD:portfolio_dev}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: portfolio-analysis
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.portfolio.backend.kafka.event"
+        spring.json.use.type.headers: "false"
+        spring.json.value.default.type: "com.portfolio.backend.kafka.event.AnalysisRequestedEvent"
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.add.type.headers: "true"
+
+  security:
+    oauth2:
+      client:
+        registration:
+          github:
+            client-id: ${GITHUB_CLIENT_ID}
+            client-secret: ${GITHUB_CLIENT_SECRET}
+            redirect-uri: "${BACKEND_URL:http://localhost:8080}/login/oauth2/code/github"
+            client-authentication-method: client_secret_post
+            scope:
+              - read:user
+              - user:email
+              - public_repo
+
+server:
+  port: 8080
+
+app:
+  # Default is a dev-only key (32 zero bytes). Always override via TOKEN_ENCRYPTION_KEY in prod.
+  token-encryption-key: ${TOKEN_ENCRYPTION_KEY:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+  frontend-url: ${FRONTEND_URL:http://localhost:3000}
+  backend-url: ${BACKEND_URL:http://localhost:8080}
+  llm:
+    api-key: ${LLM_API_KEY:}
+
+logging:
+  level:
+    com.portfolio: DEBUG
+    org.springframework.security: DEBUG
+    org.springframework.security.oauth2: DEBUG
+    org.springframework.web.client.RestTemplate: DEBUG
+
+---
+# ── docker profile (local full-stack via docker-compose) ─────────────────────
+spring:
+  config:
+    activate:
+      on-profile: docker
+  datasource:
+    url: jdbc:postgresql://postgres:5432/portfolio
+  kafka:
+    bootstrap-servers: kafka:29092
+
+---
+# ── staging profile ───────────────────────────────────────────────────────────
+spring:
+  config:
+    activate:
+      on-profile: staging
+logging:
+  level:
+    com.portfolio: INFO
+    org.springframework.security: WARN
+    org.springframework.web.client.RestTemplate: WARN
+    root: WARN
+
+---
+# ── prod profile ──────────────────────────────────────────────────────────────
+spring:
+  config:
+    activate:
+      on-profile: prod
+  jpa:
+    show-sql: false
+logging:
+  level:
+    com.portfolio: INFO
+    org.springframework.security: WARN
+    org.springframework.web.client.RestTemplate: WARN
+    root: WARN
