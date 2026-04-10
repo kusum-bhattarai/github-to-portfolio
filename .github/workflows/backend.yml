@@ -42,6 +42,26 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      kafka:
+        image: bitnami/kafka:3.9
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_CFG_NODE_ID: 0
+          KAFKA_CFG_PROCESS_ROLES: controller,broker
+          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+        options: >-
+          --health-cmd "kafka-topics.sh --bootstrap-server localhost:9092 --list"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 30s
+
     steps:
       - uses: actions/checkout@v4
 
@@ -60,6 +80,7 @@ jobs:
           GITHUB_CLIENT_SECRET: ci-placeholder-secret
           TOKEN_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
           LLM_API_KEY: ci-placeholder
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
         run: ./mvnw test
 
   build:
