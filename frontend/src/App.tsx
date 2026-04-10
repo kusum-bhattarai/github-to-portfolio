@@ -3,6 +3,8 @@ import { useCurrentUser } from './hooks/useCurrentUser';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import ResultsPage from './pages/ResultsPage';
+import WorkspacePage from './pages/WorkspacePage';
+import AnalysisStatusPage from './pages/AnalysisStatusPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { data: user, isLoading, error } = useCurrentUser();
@@ -40,6 +42,22 @@ export default function App() {
           element={
             <ProtectedRoute>
               <ResultsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/workspace"
+          element={
+            <ProtectedRoute>
+              <WorkspacePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/status"
+          element={
+            <ProtectedRoute>
+              <AnalysisStatusPage />
             </ProtectedRoute>
           }
         />

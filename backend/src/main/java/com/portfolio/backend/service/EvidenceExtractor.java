@@ -1,5 +1,7 @@
 package com.portfolio.backend.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.portfolio.backend.entity.Repository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -10,11 +12,17 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
- * Extracts structured evidence from a GitHub repository.
- * Pulls signals from README, file tree, and repo metadata
- * to build a RepoSnapshot before calling the LLM.
+ * Phase 4 — Evidence Extraction Engine.
+ *
+ * Goes beyond file-existence signals: fetches and parses actual config file contents
+ * (package.json, pom.xml, requirements.txt, Dockerfile, GitHub Actions), extracts
+ * quantitative metrics from the GitHub API (commit count, contributors, language bytes),
+ * and classifies the project type before passing everything to the LLM.
+ *
+ * This structured evidence pipeline is what separates this system from a naive LLM wrapper.
  */
 @Slf4j
 @Service
@@ -24,26 +32,47 @@ public class EvidenceExtractor {
     private static final String GITHUB_API = "https://api.github.com";
 
     private final RestTemplate restTemplate;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    // ─── Result record ───────────────────────────────────────────────────────
 
     public record ExtractionResult(
             String readmeContent,
             List<String> detectedStack,
-            Map<String, Object> signals
+            Map<String, Object> signals,
+            String projectType,
+            Map<String, Object> parsedDependencies,
+            Map<String, Object> quantitativeMetrics,
+            Map<String, Object> commitSignals
     ) {}
+
+    // ─── Main entry point ────────────────────────────────────────────────────
 
     public ExtractionResult extract(Repository repo, String accessToken) {
         String owner = repo.getFullName().split("/")[0];
         String repoName = repo.getName();
 
+        log.info("Phase 4 evidence extraction starting for {}", repo.getFullName());
+
         String readme = fetchReadme(owner, repoName, accessToken);
         List<Map<String, Object>> tree = fetchFileTree(owner, repoName, accessToken);
 
         Map<String, Object> signals = detectSignals(tree, repo);
-        List<String> stack = detectStack(tree, repo, signals);
+        Map<String, Object> parsedDeps = parseConfigFiles(owner, repoName, accessToken, tree, signals);
+        Map<String, Object> metrics = fetchQuantitativeMetrics(owner, repoName, accessToken, tree, readme);
+        List<String> commitMessages = fetchRecentCommits(owner, repoName, accessToken);
+        Map<String, Object> commitSignals = parseCommitSignals(commitMessages);
+        List<String> stack = buildStack(repo, signals, parsedDeps);
+        String projectType = classifyProjectType(repo, signals, parsedDeps, stack);
 
-        log.debug("Extracted signals for {}: {}", repo.getFullName(), signals);
-        return new ExtractionResult(readme, stack, signals);
+        log.info("Extracted evidence for {} — type: {}, stack: {}, metrics: {}, commit features: {}",
+                repo.getFullName(), projectType, stack, metrics,
+                commitSignals.get("detectedFeatures"));
+
+        return new ExtractionResult(readme, stack, signals, projectType, parsedDeps, metrics, commitSignals);
     }
+
+    // ─── README ──────────────────────────────────────────────────────────────
 
     private String fetchReadme(String owner, String repo, String token) {
         try {
@@ -55,15 +84,18 @@ public class EvidenceExtractor {
             if (response.getBody() != null && response.getBody().containsKey("content")) {
                 String encoded = (String) response.getBody().get("content");
                 byte[] decoded = Base64.getMimeDecoder().decode(encoded);
-                return new String(decoded).substring(0, Math.min(new String(decoded).length(), 4000));
+                String text = new String(decoded);
+                return text.substring(0, Math.min(text.length(), 4000));
             }
         } catch (HttpClientErrorException.NotFound e) {
-            log.debug("No README found for {}/{}", owner, repo);
+            log.debug("No README for {}/{}", owner, repo);
         } catch (Exception e) {
             log.warn("Failed to fetch README for {}/{}: {}", owner, repo, e.getMessage());
         }
         return "";
     }
+
+    // ─── File tree ───────────────────────────────────────────────────────────
 
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> fetchFileTree(String owner, String repo, String token) {
@@ -82,6 +114,8 @@ public class EvidenceExtractor {
         return List.of();
     }
 
+    // ─── Boolean signals ─────────────────────────────────────────────────────
+
     private Map<String, Object> detectSignals(List<Map<String, Object>> tree, Repository repo) {
         Set<String> filenames = new HashSet<>();
         Set<String> dirs = new HashSet<>();
@@ -95,73 +129,684 @@ public class EvidenceExtractor {
             if ("tree".equals(type)) dirs.add(lower);
         }
 
-        Map<String, Object> signals = new LinkedHashMap<>();
+        Map<String, Object> s = new LinkedHashMap<>();
 
         // Infrastructure
-        signals.put("hasDocker", filenames.contains("dockerfile") || filenames.contains("docker-compose.yml") || filenames.contains("docker-compose.yaml"));
-        signals.put("hasCI", dirs.contains(".github/workflows") || filenames.stream().anyMatch(f -> f.contains(".github/workflows")));
-        signals.put("hasTests", filenames.stream().anyMatch(f -> f.contains("test") || f.contains("spec")));
-        signals.put("hasMakefile", filenames.contains("makefile"));
+        s.put("hasDocker", filenames.contains("dockerfile") || filenames.contains("docker-compose.yml") || filenames.contains("docker-compose.yaml"));
+        s.put("hasDockerCompose", filenames.contains("docker-compose.yml") || filenames.contains("docker-compose.yaml"));
+        s.put("hasCI", dirs.contains(".github/workflows") || filenames.stream().anyMatch(f -> f.contains(".github/workflows")));
+        s.put("hasTests", filenames.stream().anyMatch(f -> f.contains("test") || f.contains("spec")));
+        s.put("hasMakefile", filenames.contains("makefile"));
+        s.put("hasKubernetes", filenames.stream().anyMatch(f -> f.contains("k8s") || f.contains("helm") || f.contains("kubernetes")));
+        s.put("hasTerraform", filenames.stream().anyMatch(f -> f.endsWith(".tf")));
 
         // Package managers / build tools
-        signals.put("hasPackageJson", filenames.contains("package.json"));
-        signals.put("hasRequirements", filenames.contains("requirements.txt") || filenames.contains("pyproject.toml") || filenames.contains("setup.py"));
-        signals.put("hasPomXml", filenames.contains("pom.xml"));
-        signals.put("hasGradleBuild", filenames.contains("build.gradle") || filenames.contains("build.gradle.kts"));
-        signals.put("hasCargoToml", filenames.contains("cargo.toml"));
-        signals.put("hasGoMod", filenames.contains("go.mod"));
+        s.put("hasPackageJson", filenames.contains("package.json"));
+        s.put("hasRequirements", filenames.contains("requirements.txt") || filenames.contains("pyproject.toml") || filenames.contains("setup.py"));
+        s.put("hasPomXml", filenames.contains("pom.xml"));
+        s.put("hasGradleBuild", filenames.contains("build.gradle") || filenames.contains("build.gradle.kts"));
+        s.put("hasCargoToml", filenames.contains("cargo.toml"));
+        s.put("hasGoMod", filenames.contains("go.mod"));
 
-        // Frontend signals
-        signals.put("hasTailwind", filenames.contains("tailwind.config.js") || filenames.contains("tailwind.config.ts"));
-        signals.put("hasVite", filenames.contains("vite.config.js") || filenames.contains("vite.config.ts"));
-        signals.put("hasNextConfig", filenames.contains("next.config.js") || filenames.contains("next.config.ts") || filenames.contains("next.config.mjs"));
+        // Frontend
+        s.put("hasTailwind", filenames.contains("tailwind.config.js") || filenames.contains("tailwind.config.ts"));
+        s.put("hasVite", filenames.contains("vite.config.js") || filenames.contains("vite.config.ts"));
+        s.put("hasNextConfig", filenames.contains("next.config.js") || filenames.contains("next.config.ts") || filenames.contains("next.config.mjs"));
+        s.put("hasWebpack", filenames.contains("webpack.config.js") || filenames.contains("webpack.config.ts"));
 
-        // Database / backend signals
-        signals.put("hasMigrations", dirs.stream().anyMatch(d -> d.contains("migration") || d.contains("migrations")));
-        signals.put("hasEnvExample", filenames.contains(".env.example") || filenames.contains(".env.sample"));
+        // Database / backend
+        s.put("hasMigrations", dirs.stream().anyMatch(d -> d.contains("migration") || d.contains("migrations")) || filenames.stream().anyMatch(f -> f.contains("flyway") || f.contains("liquibase")));
+        s.put("hasEnvExample", filenames.contains(".env.example") || filenames.contains(".env.sample"));
+        s.put("hasOpenApi", filenames.stream().anyMatch(f -> f.contains("openapi") || f.contains("swagger")));
 
-        // Architecture signals
-        signals.put("hasControllers", dirs.stream().anyMatch(d -> d.contains("controller") || d.contains("controllers")));
-        signals.put("hasServices", dirs.stream().anyMatch(d -> d.contains("service") || d.contains("services")));
-        signals.put("hasModels", dirs.stream().anyMatch(d -> d.contains("model") || d.contains("models") || d.contains("entity") || d.contains("entities")));
+        // Architecture layers
+        s.put("hasControllers", dirs.stream().anyMatch(d -> d.contains("controller") || d.contains("controllers") || d.contains("handler") || d.contains("handlers")));
+        s.put("hasServices", dirs.stream().anyMatch(d -> d.contains("service") || d.contains("services")));
+        s.put("hasModels", dirs.stream().anyMatch(d -> d.contains("model") || d.contains("models") || d.contains("entity") || d.contains("entities")));
+        s.put("hasRepositories", dirs.stream().anyMatch(d -> d.contains("repository") || d.contains("repositories") || d.contains("dao")));
 
-        // Repo metadata
-        signals.put("stars", repo.getStars());
-        signals.put("forks", repo.getForks());
-        signals.put("topics", repo.getTopics());
-        signals.put("primaryLanguage", repo.getPrimaryLanguage());
+        // Metadata
+        s.put("stars", repo.getStars());
+        s.put("forks", repo.getForks());
+        s.put("topics", repo.getTopics());
+        s.put("primaryLanguage", repo.getPrimaryLanguage());
 
-        return signals;
+        return s;
     }
 
-    private List<String> detectStack(List<Map<String, Object>> tree, Repository repo, Map<String, Object> signals) {
-        Set<String> stack = new LinkedHashSet<>();
+    // ─── Config file parsing ─────────────────────────────────────────────────
 
-        // Language
-        if (repo.getPrimaryLanguage() != null) stack.add(repo.getPrimaryLanguage());
+    private Map<String, Object> parseConfigFiles(
+            String owner, String repoName, String token,
+            List<Map<String, Object>> tree, Map<String, Object> signals) {
 
-        // JS/TS frameworks
+        Map<String, Object> deps = new LinkedHashMap<>();
+
+        Set<String> paths = tree.stream()
+                .map(n -> ((String) n.getOrDefault("path", "")).toLowerCase())
+                .collect(Collectors.toSet());
+
         if (Boolean.TRUE.equals(signals.get("hasPackageJson"))) {
-            if (Boolean.TRUE.equals(signals.get("hasNextConfig"))) stack.add("Next.js");
-            if (Boolean.TRUE.equals(signals.get("hasVite"))) stack.add("Vite");
-            if (Boolean.TRUE.equals(signals.get("hasTailwind"))) stack.add("Tailwind CSS");
+            parsePackageJson(owner, repoName, token, deps);
+        }
+        if (Boolean.TRUE.equals(signals.get("hasPomXml"))) {
+            parsePomXml(owner, repoName, token, deps);
+        }
+        if (Boolean.TRUE.equals(signals.get("hasRequirements"))) {
+            parseRequirementsTxt(owner, repoName, token, deps, paths);
+        }
+        if (Boolean.TRUE.equals(signals.get("hasGradleBuild"))) {
+            parseGradleBuild(owner, repoName, token, deps, paths);
+        }
+        if (Boolean.TRUE.equals(signals.get("hasDocker"))) {
+            parseDockerfile(owner, repoName, token, deps);
+        }
+        if (Boolean.TRUE.equals(signals.get("hasCI"))) {
+            parseGithubActions(owner, repoName, token, deps, tree);
         }
 
-        // Java frameworks
-        if (Boolean.TRUE.equals(signals.get("hasPomXml"))) stack.add("Maven");
-        if (Boolean.TRUE.equals(signals.get("hasGradleBuild"))) stack.add("Gradle");
+        return deps;
+    }
+
+    private void parsePackageJson(String owner, String repo, String token, Map<String, Object> out) {
+        try {
+            String content = fetchFileContent(owner, repo, "package.json", token);
+            if (content == null) return;
+
+            JsonNode root = objectMapper.readTree(content);
+            Map<String, String> prodDeps = new LinkedHashMap<>();
+            Map<String, String> devDeps = new LinkedHashMap<>();
+
+            if (root.has("dependencies")) {
+                root.get("dependencies").properties()
+                        .forEach(e -> prodDeps.put(e.getKey(), e.getValue().asText()));
+            }
+            if (root.has("devDependencies")) {
+                root.get("devDependencies").properties()
+                        .forEach(e -> devDeps.put(e.getKey(), e.getValue().asText()));
+            }
+
+            // Detect key frameworks from dependencies
+            List<String> frameworks = new ArrayList<>();
+            Set<String> allDeps = new HashSet<>(prodDeps.keySet());
+            allDeps.addAll(devDeps.keySet());
+
+            Map<String, String> knownFrameworks = new LinkedHashMap<>();
+            knownFrameworks.put("react", "React");
+            knownFrameworks.put("next", "Next.js");
+            knownFrameworks.put("vue", "Vue.js");
+            knownFrameworks.put("@angular/core", "Angular");
+            knownFrameworks.put("svelte", "Svelte");
+            knownFrameworks.put("express", "Express.js");
+            knownFrameworks.put("fastify", "Fastify");
+            knownFrameworks.put("@nestjs/core", "NestJS");
+            knownFrameworks.put("koa", "Koa.js");
+            knownFrameworks.put("socket.io", "Socket.IO");
+            knownFrameworks.put("graphql", "GraphQL");
+            knownFrameworks.put("prisma", "Prisma");
+            knownFrameworks.put("typeorm", "TypeORM");
+            knownFrameworks.put("mongoose", "Mongoose");
+            knownFrameworks.put("@tanstack/react-query", "TanStack Query");
+            knownFrameworks.put("redux", "Redux");
+            knownFrameworks.put("zustand", "Zustand");
+            knownFrameworks.put("tailwindcss", "Tailwind CSS");
+            knownFrameworks.put("vite", "Vite");
+            knownFrameworks.put("jest", "Jest");
+            knownFrameworks.put("vitest", "Vitest");
+            knownFrameworks.put("typescript", "TypeScript");
+            knownFrameworks.put("axios", "Axios");
+            knownFrameworks.put("zod", "Zod");
+
+            for (var entry : knownFrameworks.entrySet()) {
+                if (allDeps.contains(entry.getKey())) {
+                    String version = prodDeps.getOrDefault(entry.getKey(), devDeps.get(entry.getKey()));
+                    frameworks.add(entry.getValue() + (version != null ? " " + version.replace("^", "").replace("~", "") : ""));
+                }
+            }
+
+            out.put("npm", Map.of(
+                    "productionDependencies", prodDeps.size(),
+                    "devDependencies", devDeps.size(),
+                    "totalDependencies", allDeps.size(),
+                    "detectedFrameworks", frameworks,
+                    "hasTypeScript", allDeps.contains("typescript"),
+                    "hasTestFramework", allDeps.contains("jest") || allDeps.contains("vitest") || allDeps.contains("mocha"),
+                    "packageName", root.path("name").asText(""),
+                    "packageVersion", root.path("version").asText("")
+            ));
+
+            log.debug("Parsed package.json: {} prod deps, {} dev deps, frameworks: {}",
+                    prodDeps.size(), devDeps.size(), frameworks);
+
+        } catch (Exception e) {
+            log.warn("Failed to parse package.json for {}/{}: {}", owner, repo, e.getMessage());
+        }
+    }
+
+    private void parsePomXml(String owner, String repo, String token, Map<String, Object> out) {
+        try {
+            String content = fetchFileContent(owner, repo, "pom.xml", token);
+            if (content == null) return;
+
+            // Extract Spring Boot version from parent
+            String springBootVersion = "";
+            var parentMatch = java.util.regex.Pattern.compile(
+                    "<parent>[\\s\\S]*?<artifactId>spring-boot-starter-parent</artifactId>[\\s\\S]*?<version>([^<]+)</version>[\\s\\S]*?</parent>"
+            ).matcher(content);
+            if (parentMatch.find()) springBootVersion = parentMatch.group(1).trim();
+
+            // Extract all dependency artifactIds
+            List<String> artifactIds = new ArrayList<>();
+            var depPattern = java.util.regex.Pattern.compile("<artifactId>([^<]+)</artifactId>");
+            var matcher = depPattern.matcher(content);
+            boolean firstSkipped = false; // first is the project itself
+            while (matcher.find()) {
+                if (!firstSkipped) { firstSkipped = true; continue; }
+                artifactIds.add(matcher.group(1).trim());
+            }
+
+            // Map to friendly framework names
+            List<String> frameworks = new ArrayList<>();
+            Map<String, String> knownMaven = new LinkedHashMap<>();
+            knownMaven.put("spring-boot-starter-web", "Spring Web MVC");
+            knownMaven.put("spring-boot-starter-data-jpa", "Spring Data JPA");
+            knownMaven.put("spring-boot-starter-security", "Spring Security");
+            knownMaven.put("spring-boot-starter-oauth2-client", "Spring OAuth2 Client");
+            knownMaven.put("spring-boot-starter-data-redis", "Spring Data Redis");
+            knownMaven.put("spring-boot-starter-validation", "Spring Validation");
+            knownMaven.put("spring-boot-starter-webflux", "Spring WebFlux");
+            knownMaven.put("spring-kafka", "Spring Kafka");
+            knownMaven.put("flyway-core", "Flyway Migrations");
+            knownMaven.put("liquibase-core", "Liquibase Migrations");
+            knownMaven.put("postgresql", "PostgreSQL");
+            knownMaven.put("h2", "H2 (in-memory DB)");
+            knownMaven.put("lombok", "Lombok");
+            knownMaven.put("mapstruct", "MapStruct");
+            knownMaven.put("spring-boot-starter-test", "JUnit 5 / Spring Boot Test");
+            knownMaven.put("mockito-core", "Mockito");
+            knownMaven.put("testcontainers", "Testcontainers");
+            knownMaven.put("spring-boot-starter-actuator", "Spring Actuator");
+            knownMaven.put("micrometer-registry-prometheus", "Prometheus / Micrometer");
+
+            for (String id : artifactIds) {
+                if (knownMaven.containsKey(id)) frameworks.add(knownMaven.get(id));
+            }
+
+            out.put("maven", Map.of(
+                    "totalDependencies", artifactIds.size(),
+                    "springBootVersion", springBootVersion,
+                    "detectedFrameworks", frameworks,
+                    "hasTestDependencies", artifactIds.contains("spring-boot-starter-test") || artifactIds.contains("junit-jupiter"),
+                    "hasMigrationTool", artifactIds.contains("flyway-core") || artifactIds.contains("liquibase-core")
+            ));
+
+            log.debug("Parsed pom.xml: Spring Boot {}, {} deps, frameworks: {}",
+                    springBootVersion, artifactIds.size(), frameworks);
+
+        } catch (Exception e) {
+            log.warn("Failed to parse pom.xml for {}/{}: {}", owner, repo, e.getMessage());
+        }
+    }
+
+    private void parseRequirementsTxt(String owner, String repo, String token, Map<String, Object> out, Set<String> paths) {
+        try {
+            String fileName = paths.contains("pyproject.toml") ? "pyproject.toml" : "requirements.txt";
+            String content = fetchFileContent(owner, repo, fileName, token);
+            if (content == null) content = fetchFileContent(owner, repo, "requirements.txt", token);
+            if (content == null) return;
+
+            List<String> packages = Arrays.stream(content.split("\n"))
+                    .map(String::trim)
+                    .filter(l -> !l.isEmpty() && !l.startsWith("#") && !l.startsWith("-r"))
+                    .map(l -> l.split("[>=<!~\\[;]")[0].trim().toLowerCase())
+                    .filter(l -> !l.isEmpty())
+                    .collect(Collectors.toList());
+
+            List<String> frameworks = new ArrayList<>();
+            Map<String, String> knownPython = new LinkedHashMap<>();
+            knownPython.put("django", "Django");
+            knownPython.put("flask", "Flask");
+            knownPython.put("fastapi", "FastAPI");
+            knownPython.put("starlette", "Starlette");
+            knownPython.put("uvicorn", "Uvicorn");
+            knownPython.put("gunicorn", "Gunicorn");
+            knownPython.put("celery", "Celery");
+            knownPython.put("sqlalchemy", "SQLAlchemy");
+            knownPython.put("alembic", "Alembic (DB migrations)");
+            knownPython.put("pydantic", "Pydantic");
+            knownPython.put("pandas", "Pandas");
+            knownPython.put("numpy", "NumPy");
+            knownPython.put("scikit-learn", "scikit-learn");
+            knownPython.put("torch", "PyTorch");
+            knownPython.put("tensorflow", "TensorFlow");
+            knownPython.put("transformers", "HuggingFace Transformers");
+            knownPython.put("openai", "OpenAI SDK");
+            knownPython.put("anthropic", "Anthropic SDK");
+            knownPython.put("redis", "Redis");
+            knownPython.put("pytest", "pytest");
+            knownPython.put("httpx", "httpx");
+            knownPython.put("requests", "requests");
+
+            Set<String> packageSet = new HashSet<>(packages);
+            for (var entry : knownPython.entrySet()) {
+                if (packageSet.contains(entry.getKey())) frameworks.add(entry.getValue());
+            }
+
+            boolean isMlProject = packageSet.stream().anyMatch(p ->
+                    p.equals("pandas") || p.equals("numpy") || p.equals("torch") ||
+                    p.equals("tensorflow") || p.equals("scikit-learn") || p.equals("transformers"));
+
+            out.put("python", Map.of(
+                    "totalPackages", packages.size(),
+                    "detectedFrameworks", frameworks,
+                    "isMlProject", isMlProject,
+                    "hasTestFramework", packageSet.contains("pytest"),
+                    "hasAsyncSupport", packageSet.contains("uvicorn") || packageSet.contains("asyncio")
+            ));
+
+            log.debug("Parsed requirements: {} packages, frameworks: {}", packages.size(), frameworks);
+
+        } catch (Exception e) {
+            log.warn("Failed to parse requirements for {}/{}: {}", owner, repo, e.getMessage());
+        }
+    }
+
+    private void parseGradleBuild(String owner, String repo, String token, Map<String, Object> out, Set<String> paths) {
+        try {
+            String fileName = paths.contains("build.gradle.kts") ? "build.gradle.kts" : "build.gradle";
+            String content = fetchFileContent(owner, repo, fileName, token);
+            if (content == null) return;
+
+            List<String> frameworks = new ArrayList<>();
+            Map<String, String> knownGradle = new LinkedHashMap<>();
+            knownGradle.put("spring-boot-starter-web", "Spring Web MVC");
+            knownGradle.put("spring-boot-starter-data-jpa", "Spring Data JPA");
+            knownGradle.put("spring-boot-starter-security", "Spring Security");
+            knownGradle.put("flyway-core", "Flyway");
+            knownGradle.put("postgresql", "PostgreSQL");
+            knownGradle.put("lombok", "Lombok");
+            knownGradle.put("spring-boot-starter-test", "JUnit 5 / Spring Boot Test");
+            knownGradle.put("testcontainers", "Testcontainers");
+            knownGradle.put("kotlin-stdlib", "Kotlin");
+
+            for (var entry : knownGradle.entrySet()) {
+                if (content.contains(entry.getKey())) frameworks.add(entry.getValue());
+            }
+
+            // Count dependency lines
+            long depCount = Arrays.stream(content.split("\n"))
+                    .filter(l -> l.trim().startsWith("implementation") || l.trim().startsWith("testImplementation") || l.trim().startsWith("api "))
+                    .count();
+
+            out.put("gradle", Map.of(
+                    "totalDependencies", depCount,
+                    "detectedFrameworks", frameworks,
+                    "isKotlinDsl", fileName.endsWith(".kts")
+            ));
+
+        } catch (Exception e) {
+            log.warn("Failed to parse build.gradle for {}/{}: {}", owner, repo, e.getMessage());
+        }
+    }
+
+    private void parseDockerfile(String owner, String repo, String token, Map<String, Object> out) {
+        try {
+            String content = fetchFileContent(owner, repo, "Dockerfile", token);
+            if (content == null) return;
+
+            List<String> fromStatements = Arrays.stream(content.split("\n"))
+                    .map(String::trim)
+                    .filter(l -> l.toUpperCase().startsWith("FROM"))
+                    .collect(Collectors.toList());
+
+            boolean isMultiStage = fromStatements.size() > 1;
+            List<String> baseImages = fromStatements.stream()
+                    .map(l -> l.substring(5).trim().split("\\s")[0]) // strip "FROM " and AS alias
+                    .collect(Collectors.toList());
+
+            // Detect exposed ports
+            List<String> exposedPorts = Arrays.stream(content.split("\n"))
+                    .map(String::trim)
+                    .filter(l -> l.toUpperCase().startsWith("EXPOSE"))
+                    .map(l -> l.substring(7).trim())
+                    .collect(Collectors.toList());
+
+            out.put("docker", Map.of(
+                    "stageCount", fromStatements.size(),
+                    "isMultiStage", isMultiStage,
+                    "baseImages", baseImages,
+                    "exposedPorts", exposedPorts
+            ));
+
+            log.debug("Parsed Dockerfile: {} stages, multi-stage={}, bases={}",
+                    fromStatements.size(), isMultiStage, baseImages);
+
+        } catch (Exception e) {
+            log.warn("Failed to parse Dockerfile for {}/{}: {}", owner, repo, e.getMessage());
+        }
+    }
+
+    private void parseGithubActions(String owner, String repo, String token,
+                                    Map<String, Object> out, List<Map<String, Object>> tree) {
+        try {
+            // Find all workflow files
+            List<String> workflowFiles = tree.stream()
+                    .map(n -> (String) n.getOrDefault("path", ""))
+                    .filter(p -> p.startsWith(".github/workflows/") && (p.endsWith(".yml") || p.endsWith(".yaml")))
+                    .collect(Collectors.toList());
+
+            if (workflowFiles.isEmpty()) return;
+
+            List<String> workflowNames = new ArrayList<>();
+            List<String> deployTargets = new ArrayList<>();
+            boolean hasBuildJob = false, hasTestJob = false, hasDeployJob = false, hasPrChecks = false;
+
+            for (String wfPath : workflowFiles) {
+                String content = fetchFileContent(owner, repo, wfPath, token);
+                if (content == null) continue;
+
+                String lower = content.toLowerCase();
+                workflowNames.add(wfPath.replace(".github/workflows/", "").replace(".yml", "").replace(".yaml", ""));
+
+                if (lower.contains("build")) hasBuildJob = true;
+                if (lower.contains("test") || lower.contains("junit") || lower.contains("pytest")) hasTestJob = true;
+                if (lower.contains("deploy") || lower.contains("release")) hasDeployJob = true;
+                if (lower.contains("pull_request")) hasPrChecks = true;
+
+                // Detect deployment targets
+                if (lower.contains("aws") || lower.contains("ecr") || lower.contains("ecs") || lower.contains("lambda")) deployTargets.add("AWS");
+                if (lower.contains("gcp") || lower.contains("gke") || lower.contains("gcr") || lower.contains("cloud run")) deployTargets.add("GCP");
+                if (lower.contains("azure")) deployTargets.add("Azure");
+                if (lower.contains("vercel")) deployTargets.add("Vercel");
+                if (lower.contains("heroku")) deployTargets.add("Heroku");
+                if (lower.contains("docker") && (lower.contains("push") || lower.contains("registry"))) deployTargets.add("Docker Registry");
+            }
+
+            out.put("githubActions", Map.of(
+                    "workflowCount", workflowFiles.size(),
+                    "workflowNames", workflowNames,
+                    "hasBuildJob", hasBuildJob,
+                    "hasTestJob", hasTestJob,
+                    "hasDeployJob", hasDeployJob,
+                    "hasPrChecks", hasPrChecks,
+                    "deployTargets", deployTargets.stream().distinct().collect(Collectors.toList())
+            ));
+
+            log.debug("Parsed {} GitHub Actions workflows, deployTargets={}", workflowFiles.size(), deployTargets);
+
+        } catch (Exception e) {
+            log.warn("Failed to parse GitHub Actions for {}/{}: {}", owner, repo, e.getMessage());
+        }
+    }
+
+    // ─── Quantitative metrics ─────────────────────────────────────────────────
+
+    private Map<String, Object> fetchQuantitativeMetrics(
+            String owner, String repoName, String token,
+            List<Map<String, Object>> tree, String readme) {
+
+        Map<String, Object> metrics = new LinkedHashMap<>();
+
+        // ── Class-level counts (more meaningful than raw file counts) ─────────
+
+        // Test class count
+        long testClassCount = tree.stream()
+                .map(n -> ((String) n.getOrDefault("path", "")).toLowerCase())
+                .filter(p -> !p.contains("node_modules"))
+                .filter(p -> (p.contains("test") || p.contains("spec") || p.contains("__tests__"))
+                        && (p.endsWith(".java") || p.endsWith(".py") || p.endsWith(".ts")
+                            || p.endsWith(".tsx") || p.endsWith(".js") || p.endsWith(".jsx")
+                            || p.endsWith(".go") || p.endsWith(".rs")))
+                .count();
+        if (testClassCount > 0) metrics.put("testClassCount", testClassCount);
+
+        // Entity / model class count
+        long entityClassCount = tree.stream()
+                .map(n -> (String) n.getOrDefault("path", ""))
+                .filter(p -> {
+                    String lower = p.toLowerCase();
+                    return (lower.contains("/entity/") || lower.contains("/entities/")
+                            || lower.contains("/model/") || lower.contains("/models/")
+                            || lower.contains("/domain/"))
+                            && (lower.endsWith(".java") || lower.endsWith(".kt")
+                                || lower.endsWith(".py") || lower.endsWith(".ts"));
+                })
+                .count();
+        if (entityClassCount > 0) metrics.put("entityClassCount", entityClassCount);
+
+        // Controller / handler class count
+        long controllerClassCount = tree.stream()
+                .map(n -> (String) n.getOrDefault("path", ""))
+                .filter(p -> {
+                    String lower = p.toLowerCase();
+                    return (lower.contains("/controller/") || lower.contains("/controllers/")
+                            || lower.contains("/handler/") || lower.contains("/handlers/")
+                            || lower.contains("/router/") || lower.contains("/routes/")
+                            || lower.contains("/views/"))
+                            && (lower.endsWith(".java") || lower.endsWith(".kt")
+                                || lower.endsWith(".py") || lower.endsWith(".ts")
+                                || lower.endsWith(".go"));
+                })
+                .count();
+        if (controllerClassCount > 0) metrics.put("controllerClassCount", controllerClassCount);
+
+        // Service class count
+        long serviceClassCount = tree.stream()
+                .map(n -> (String) n.getOrDefault("path", ""))
+                .filter(p -> {
+                    String lower = p.toLowerCase();
+                    return (lower.contains("/service/") || lower.contains("/services/")
+                            || lower.contains("/usecase/") || lower.contains("/usecases/"))
+                            && (lower.endsWith(".java") || lower.endsWith(".kt")
+                                || lower.endsWith(".py") || lower.endsWith(".ts")
+                                || lower.endsWith(".go"));
+                })
+                .count();
+        if (serviceClassCount > 0) metrics.put("serviceClassCount", serviceClassCount);
+
+        // ── GitHub API metrics ────────────────────────────────────────────────
+        metrics.put("commitCount", fetchCommitCount(owner, repoName, token));
+        metrics.put("contributorCount", fetchContributorCount(owner, repoName, token));
+
+        // Language breakdown in bytes (for % breakdown in prompt)
+        Map<String, Object> langBytes = fetchLanguageBreakdown(owner, repoName, token);
+        metrics.put("languageBytes", langBytes);
+
+        // ── README-scraped metrics ────────────────────────────────────────────
+        if (!readme.isBlank()) {
+            Map<String, Object> readmeMetrics = extractReadmeMetrics(readme);
+            if (!readmeMetrics.isEmpty()) metrics.put("readmeMetrics", readmeMetrics);
+        }
+
+        log.debug("Quantitative metrics for {}/{}: {} commits, {} contributors, {} test classes, {} entities",
+                owner, repoName,
+                metrics.get("commitCount"), metrics.get("contributorCount"),
+                testClassCount, entityClassCount);
+
+        return metrics;
+    }
+
+    /**
+     * Scrapes the README for concrete numbers that strengthen resume bullets:
+     * test coverage %, response time/latency, throughput, scale indicators.
+     */
+    private Map<String, Object> extractReadmeMetrics(String readme) {
+        Map<String, Object> found = new LinkedHashMap<>();
+        String text = readme.toLowerCase();
+
+        // Test coverage percentage — "87% coverage", "coverage: 87%", badge text
+        var coveragePattern = java.util.regex.Pattern.compile(
+                "(\\d{1,3}(?:\\.\\d+)?)\\s*%\\s*(?:test\\s+)?coverage|" +
+                "coverage[:\\s]+([\\d]{1,3}(?:\\.\\d+)?)\\s*%|" +
+                "codecov[^\\n]*?(\\d{1,3})%|" +
+                "passing.*?(\\d{1,3})%",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        var coverageMatcher = coveragePattern.matcher(readme);
+        if (coverageMatcher.find()) {
+            for (int g = 1; g <= coverageMatcher.groupCount(); g++) {
+                if (coverageMatcher.group(g) != null) {
+                    found.put("testCoveragePercent", coverageMatcher.group(g) + "%");
+                    break;
+                }
+            }
+        }
+
+        // Response time / latency — "< 200ms", "50ms response", "p99 latency: 120ms"
+        var latencyPattern = java.util.regex.Pattern.compile(
+                "(?:p\\d{2,3}\\s+latency[:\\s]+)?<?\\s*(\\d+(?:\\.\\d+)?)\\s*ms\\b",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        var latencyMatcher = latencyPattern.matcher(readme);
+        if (latencyMatcher.find()) {
+            found.put("responseTimeMs", latencyMatcher.group(1) + "ms");
+        }
+
+        // Throughput / requests per second
+        var rpsPattern = java.util.regex.Pattern.compile(
+                "(\\d+[kKmM]?)\\s*(?:req(?:uests?)?/s|rps|requests per second)",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        var rpsMatcher = rpsPattern.matcher(readme);
+        if (rpsMatcher.find()) {
+            found.put("throughput", rpsMatcher.group(1) + " req/s");
+        }
+
+        // Scale — "1000+ users", "10k records", "handles N requests"
+        var scalePattern = java.util.regex.Pattern.compile(
+                "(\\d+[kKmMbB]?\\+?)\\s*(?:users?|customers?|requests?|records?|transactions?|operations?)",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        var scaleMatcher = scalePattern.matcher(readme);
+        if (scaleMatcher.find()) {
+            found.put("scaleIndicator", scaleMatcher.group(0).trim());
+        }
+
+        // API endpoint count — "15 endpoints", "20+ API routes"
+        var endpointPattern = java.util.regex.Pattern.compile(
+                "(\\d+)\\s*(?:\\+\\s*)?(?:REST\\s+|API\\s+)?endpoints?",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        var endpointMatcher = endpointPattern.matcher(readme);
+        if (endpointMatcher.find()) {
+            found.put("apiEndpointCount", endpointMatcher.group(1) + " endpoints");
+        }
+
+        return found;
+    }
+
+    private int fetchCommitCount(String owner, String repo, String token) {
+        try {
+            // Request just 1 commit per page and read the last page number from the Link header
+            String url = GITHUB_API + "/repos/" + owner + "/" + repo + "/commits?per_page=1";
+            ResponseEntity<List<Map<String, Object>>> response = restTemplate.exchange(
+                    url, HttpMethod.GET, authHeaders(token),
+                    new ParameterizedTypeReference<>() {}
+            );
+            String linkHeader = response.getHeaders().getFirst("Link");
+            if (linkHeader != null && linkHeader.contains("rel=\"last\"")) {
+                // Parse: <https://api.github.com/...?page=47>; rel="last"
+                var matcher = java.util.regex.Pattern
+                        .compile("[?&]page=(\\d+)>; rel=\"last\"")
+                        .matcher(linkHeader);
+                if (matcher.find()) return Integer.parseInt(matcher.group(1));
+            }
+            // No Link header means all commits fit in one page
+            if (response.getBody() != null) return response.getBody().size();
+        } catch (Exception e) {
+            log.debug("Failed to fetch commit count for {}/{}: {}", owner, repo, e.getMessage());
+        }
+        return 0;
+    }
+
+    private int fetchContributorCount(String owner, String repo, String token) {
+        try {
+            String url = GITHUB_API + "/repos/" + owner + "/" + repo + "/contributors?per_page=1&anon=false";
+            ResponseEntity<List<Map<String, Object>>> response = restTemplate.exchange(
+                    url, HttpMethod.GET, authHeaders(token),
+                    new ParameterizedTypeReference<>() {}
+            );
+            String linkHeader = response.getHeaders().getFirst("Link");
+            if (linkHeader != null && linkHeader.contains("rel=\"last\"")) {
+                var matcher = java.util.regex.Pattern
+                        .compile("[?&]page=(\\d+)>; rel=\"last\"")
+                        .matcher(linkHeader);
+                if (matcher.find()) return Integer.parseInt(matcher.group(1));
+            }
+            if (response.getBody() != null) return response.getBody().size();
+        } catch (Exception e) {
+            log.debug("Failed to fetch contributor count for {}/{}: {}", owner, repo, e.getMessage());
+        }
+        return 0;
+    }
+
+    private Map<String, Object> fetchLanguageBreakdown(String owner, String repo, String token) {
+        try {
+            String url = GITHUB_API + "/repos/" + owner + "/" + repo + "/languages";
+            ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
+                    url, HttpMethod.GET, authHeaders(token),
+                    new ParameterizedTypeReference<>() {}
+            );
+            return response.getBody() != null ? response.getBody() : Map.of();
+        } catch (Exception e) {
+            log.debug("Failed to fetch language breakdown for {}/{}: {}", owner, repo, e.getMessage());
+        }
+        return Map.of();
+    }
+
+    // ─── Stack builder ───────────────────────────────────────────────────────
+
+    @SuppressWarnings("unchecked")
+    private List<String> buildStack(Repository repo, Map<String, Object> signals, Map<String, Object> deps) {
+        Set<String> stack = new LinkedHashSet<>();
+
+        // Primary language
+        if (repo.getPrimaryLanguage() != null) stack.add(repo.getPrimaryLanguage());
+
+        // From NPM parsed deps - exact framework names
+        if (deps.containsKey("npm")) {
+            Map<String, Object> npm = (Map<String, Object>) deps.get("npm");
+            List<String> frameworks = (List<String>) npm.getOrDefault("detectedFrameworks", List.of());
+            // Add clean names without version for stack list
+            frameworks.forEach(f -> stack.add(f.split(" ")[0] + (f.contains(" ") ? " " + f.split(" ")[1] : "")));
+            if (Boolean.TRUE.equals(npm.get("hasTypeScript"))) stack.add("TypeScript");
+        }
+
+        // From Maven
+        if (deps.containsKey("maven")) {
+            Map<String, Object> maven = (Map<String, Object>) deps.get("maven");
+            List<String> frameworks = (List<String>) maven.getOrDefault("detectedFrameworks", List.of());
+            frameworks.forEach(stack::add);
+            String sbVersion = (String) maven.getOrDefault("springBootVersion", "");
+            if (!sbVersion.isEmpty()) {
+                stack.remove("Spring Web MVC"); // Will be added back with Spring Boot label
+                stack.add("Spring Boot " + sbVersion);
+            }
+        }
+
+        // From Gradle
+        if (deps.containsKey("gradle")) {
+            Map<String, Object> gradle = (Map<String, Object>) deps.get("gradle");
+            List<String> frameworks = (List<String>) gradle.getOrDefault("detectedFrameworks", List.of());
+            frameworks.forEach(stack::add);
+        }
+
+        // From Python
+        if (deps.containsKey("python")) {
+            Map<String, Object> python = (Map<String, Object>) deps.get("python");
+            List<String> frameworks = (List<String>) python.getOrDefault("detectedFrameworks", List.of());
+            frameworks.forEach(stack::add);
+        }
 
         // Infrastructure
         if (Boolean.TRUE.equals(signals.get("hasDocker"))) stack.add("Docker");
+        if (Boolean.TRUE.equals(signals.get("hasDockerCompose"))) stack.add("Docker Compose");
         if (Boolean.TRUE.equals(signals.get("hasCI"))) stack.add("GitHub Actions");
+        if (Boolean.TRUE.equals(signals.get("hasKubernetes"))) stack.add("Kubernetes");
+        if (Boolean.TRUE.equals(signals.get("hasTerraform"))) stack.add("Terraform");
 
-        // Topics as additional stack signals
+        // Topics
         if (repo.getTopics() != null) {
             Set<String> knownTech = Set.of(
-                "react", "vue", "angular", "svelte", "nextjs", "express", "fastapi",
-                "django", "flask", "spring", "springboot", "postgres", "postgresql",
-                "mysql", "mongodb", "redis", "graphql", "rest", "grpc", "kubernetes",
-                "terraform", "aws", "gcp", "azure"
+                    "react", "vue", "angular", "svelte", "nextjs", "express", "fastapi",
+                    "django", "flask", "spring", "springboot", "postgres", "postgresql",
+                    "mysql", "mongodb", "redis", "graphql", "rest", "grpc", "kubernetes",
+                    "terraform", "aws", "gcp", "azure", "kafka", "rabbitmq", "elasticsearch"
             );
             for (String topic : repo.getTopics()) {
                 if (knownTech.contains(topic.toLowerCase())) {
@@ -170,7 +815,184 @@ public class EvidenceExtractor {
             }
         }
 
+        // Front-end config signals (fallback if not detected via package.json)
+        if (!deps.containsKey("npm")) {
+            if (Boolean.TRUE.equals(signals.get("hasNextConfig"))) stack.add("Next.js");
+            if (Boolean.TRUE.equals(signals.get("hasTailwind"))) stack.add("Tailwind CSS");
+            if (Boolean.TRUE.equals(signals.get("hasVite"))) stack.add("Vite");
+        }
+
+        // Build tools
+        if (Boolean.TRUE.equals(signals.get("hasPomXml")) && !deps.containsKey("maven")) stack.add("Maven");
+        if (Boolean.TRUE.equals(signals.get("hasGradleBuild")) && !deps.containsKey("gradle")) stack.add("Gradle");
+
         return new ArrayList<>(stack);
+    }
+
+    // ─── Project type classifier ─────────────────────────────────────────────
+
+    @SuppressWarnings("unchecked")
+    private String classifyProjectType(Repository repo, Map<String, Object> signals,
+                                       Map<String, Object> deps, List<String> stack) {
+
+        boolean hasFrontend = deps.containsKey("npm") || Boolean.TRUE.equals(signals.get("hasPackageJson"));
+        boolean hasJavaBackend = deps.containsKey("maven") || deps.containsKey("gradle") ||
+                Boolean.TRUE.equals(signals.get("hasPomXml")) || Boolean.TRUE.equals(signals.get("hasGradleBuild"));
+        boolean hasPythonBackend = deps.containsKey("python") || Boolean.TRUE.equals(signals.get("hasRequirements"));
+        boolean hasGoBackend = Boolean.TRUE.equals(signals.get("hasGoMod"));
+        boolean hasRust = Boolean.TRUE.equals(signals.get("hasCargoToml"));
+        boolean hasInfrastructure = Boolean.TRUE.equals(signals.get("hasDocker")) && Boolean.TRUE.equals(signals.get("hasCI"));
+
+        // ML/AI detection
+        if (deps.containsKey("python")) {
+            Map<String, Object> python = (Map<String, Object>) deps.get("python");
+            if (Boolean.TRUE.equals(python.get("isMlProject"))) return "ML/AI Project";
+        }
+        if (repo.getTopics() != null && repo.getTopics().stream()
+                .anyMatch(t -> t.equalsIgnoreCase("machine-learning") || t.equalsIgnoreCase("deep-learning")
+                        || t.equalsIgnoreCase("nlp") || t.equalsIgnoreCase("ai"))) {
+            return "ML/AI Project";
+        }
+
+        // Full stack: frontend + backend
+        if (hasFrontend && (hasJavaBackend || hasPythonBackend || hasGoBackend)) {
+            return "Full Stack Web Application";
+        }
+
+        // DevOps / Infrastructure
+        if (hasInfrastructure && Boolean.TRUE.equals(signals.get("hasTerraform"))) return "DevOps/Infrastructure";
+        if (hasInfrastructure && Boolean.TRUE.equals(signals.get("hasKubernetes"))) return "DevOps/Infrastructure";
+
+        // Backend API
+        if ((hasJavaBackend || hasPythonBackend || hasGoBackend) && !hasFrontend) {
+            if (Boolean.TRUE.equals(signals.get("hasControllers")) || Boolean.TRUE.equals(signals.get("hasOpenApi"))) {
+                return "Backend REST API";
+            }
+            return "Backend Application";
+        }
+
+        // Frontend SPA
+        if (hasFrontend && !hasJavaBackend && !hasPythonBackend && !hasGoBackend) {
+            return "Frontend SPA";
+        }
+
+        // CLI / Systems
+        if (hasRust && !hasFrontend) return "CLI Tool / Systems";
+        if (hasGoBackend && !hasFrontend) return "CLI Tool / Backend Service";
+
+        // Library heuristic
+        String nameLower = repo.getName() != null ? repo.getName().toLowerCase() : "";
+        String descLower = repo.getDescription() != null ? repo.getDescription().toLowerCase() : "";
+        if (nameLower.contains("sdk") || nameLower.contains("lib") || nameLower.contains("client") ||
+                descLower.contains("library") || descLower.contains("sdk")) {
+            return "Library/SDK";
+        }
+
+        return "Software Project";
+    }
+
+    // ─── Commit history intelligence (Phase 7) ──────────────────────────────
+
+    @SuppressWarnings("unchecked")
+    private List<String> fetchRecentCommits(String owner, String repo, String token) {
+        try {
+            String url = GITHUB_API + "/repos/" + owner + "/" + repo + "/commits?per_page=30";
+            ResponseEntity<List<Map<String, Object>>> response = restTemplate.exchange(
+                    url, HttpMethod.GET, authHeaders(token),
+                    new ParameterizedTypeReference<>() {}
+            );
+            if (response.getBody() == null) return List.of();
+            return response.getBody().stream()
+                    .map(c -> {
+                        Map<String, Object> commit = (Map<String, Object>) c.get("commit");
+                        if (commit == null) return "";
+                        String msg = (String) commit.get("message");
+                        if (msg == null || msg.isBlank()) return "";
+                        // Use only the subject line (first line) to reduce noise
+                        return msg.split("\n")[0].trim();
+                    })
+                    .filter(m -> !m.isBlank())
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            log.debug("Failed to fetch commit messages for {}/{}: {}", owner, repo, e.getMessage());
+            return List.of();
+        }
+    }
+
+    private Map<String, Object> parseCommitSignals(List<String> messages) {
+        if (messages.isEmpty()) return Map.of();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("messagesAnalyzed", messages.size());
+
+        String allMessages = String.join(" ", messages).toLowerCase();
+
+        // ── Feature category detection ────────────────────────────────────────
+        Map<String, Boolean> categories = new LinkedHashMap<>();
+        categories.put("hasAuthFeatures",    matches(allMessages, "auth", "login", "oauth", "jwt", "session", "password", "signup", "token", "sso", "2fa"));
+        categories.put("hasRealTimeFeatures", matches(allMessages, "websocket", "socket.io", "streaming", "realtime", "real-time", "notification", "pubsub", "sse", "event-driven", "broadcast"));
+        categories.put("hasCachingLayer",    matches(allMessages, "cache", "redis", "memcach", "cdn", "ttl", "evict", "invalidat"));
+        categories.put("hasDockerWork",      matches(allMessages, "docker", "containerize", "dockerfile", "compose", "k8s", "kubernetes", "helm"));
+        categories.put("hasCiCdWork",        matches(allMessages, "ci/cd", "pipeline", "workflow", "deploy", "release", "publish", "github action", "ci ", " cd "));
+        categories.put("hasRefactoring",     matches(allMessages, "refactor", "cleanup", "clean up", "restructure", "extract", "decouple", "reorganize", "simplif"));
+        categories.put("hasPerformanceWork", matches(allMessages, "optim", "perf", "latency", "throughput", "faster", "benchmark", "bottleneck", "profil", "n+1"));
+        categories.put("hasTestingWork",     matches(allMessages, "test", "spec", "coverage", "unit test", "integration test", "e2e", "mock", "fixture", "assert"));
+        categories.put("hasDatabaseWork",    matches(allMessages, "migration", "schema", "index", "query", "db ", "sql", "table", "column", "flyway", "liquibase", "seed"));
+        categories.put("hasSecurityWork",    matches(allMessages, "security", "vuln", "sanitize", "validate", "xss", "csrf", "injection", "encrypt", "rate limit", "cors"));
+        categories.put("hasApiDesignWork",   matches(allMessages, "endpoint", "route", "rest api", "graphql", "version", "swagger", "openapi", "paginate", "pagination"));
+        categories.put("hasAsyncWork",       matches(allMessages, "async", "concurrent", "thread", "background job", "queue", "worker", "message", "event"));
+        result.put("categories", categories);
+
+        // ── Human-readable feature list for LLM prompt ────────────────────────
+        List<String> detectedFeatures = new ArrayList<>();
+        if (Boolean.TRUE.equals(categories.get("hasAuthFeatures")))     detectedFeatures.add("authentication / authorization");
+        if (Boolean.TRUE.equals(categories.get("hasRealTimeFeatures"))) detectedFeatures.add("real-time features (WebSocket/SSE)");
+        if (Boolean.TRUE.equals(categories.get("hasCachingLayer")))     detectedFeatures.add("caching layer");
+        if (Boolean.TRUE.equals(categories.get("hasDockerWork")))       detectedFeatures.add("containerization");
+        if (Boolean.TRUE.equals(categories.get("hasCiCdWork")))         detectedFeatures.add("CI/CD pipeline");
+        if (Boolean.TRUE.equals(categories.get("hasRefactoring")))      detectedFeatures.add("refactoring passes");
+        if (Boolean.TRUE.equals(categories.get("hasPerformanceWork")))  detectedFeatures.add("performance optimization");
+        if (Boolean.TRUE.equals(categories.get("hasTestingWork")))      detectedFeatures.add("test coverage investment");
+        if (Boolean.TRUE.equals(categories.get("hasDatabaseWork")))     detectedFeatures.add("database design / migrations");
+        if (Boolean.TRUE.equals(categories.get("hasSecurityWork")))     detectedFeatures.add("security hardening");
+        if (Boolean.TRUE.equals(categories.get("hasApiDesignWork")))    detectedFeatures.add("API design / versioning");
+        if (Boolean.TRUE.equals(categories.get("hasAsyncWork")))        detectedFeatures.add("async / background processing");
+        result.put("detectedFeatures", detectedFeatures);
+
+        // ── Sample commit messages — give LLM context on what was actually built ─
+        result.put("recentMessages", messages.stream().limit(10).collect(Collectors.toList()));
+
+        log.debug("Commit signals from {} messages: features={}", messages.size(), detectedFeatures);
+        return result;
+    }
+
+    private boolean matches(String text, String... keywords) {
+        for (String keyword : keywords) {
+            if (text.contains(keyword)) return true;
+        }
+        return false;
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    private String fetchFileContent(String owner, String repo, String path, String token) {
+        try {
+            String url = GITHUB_API + "/repos/" + owner + "/" + repo + "/contents/" + path;
+            ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
+                    url, HttpMethod.GET, authHeaders(token),
+                    new ParameterizedTypeReference<>() {}
+            );
+            if (response.getBody() != null && response.getBody().containsKey("content")) {
+                String encoded = (String) response.getBody().get("content");
+                byte[] decoded = Base64.getMimeDecoder().decode(encoded);
+                return new String(decoded);
+            }
+        } catch (HttpClientErrorException.NotFound e) {
+            // File doesn't exist, silently ignore
+        } catch (Exception e) {
+            log.debug("Failed to fetch {}/{}/{}: {}", owner, repo, path, e.getMessage());
+        }
+        return null;
     }
 
     private String capitalize(String s) {
