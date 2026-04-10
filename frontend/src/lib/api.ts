@@ -96,7 +96,10 @@ export const api = {
   },
   jobs: {
     get: (jobId: string) => request<AnalysisJob>(`/api/jobs/${jobId}`),
-    list: () => request<AnalysisJob[]>('/api/jobs'),
+    list: (page = 0, size = 20) =>
+      request<{ content: AnalysisJob[]; totalElements: number; totalPages: number; last: boolean }>(
+        `/api/jobs?page=${page}&size=${size}`
+      ).then(r => r.content),
   },
   projects: {
     list: () => request<ProjectSummary[]>('/api/projects'),

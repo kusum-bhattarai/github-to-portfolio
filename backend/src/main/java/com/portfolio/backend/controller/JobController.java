@@ -39,20 +39,34 @@ public class JobController {
                 .orElse(ResponseEntity.status(401).build());
     }
 
-    /** List all jobs for the authenticated user, most recent first. */
+    /** List jobs for the authenticated user, most recent first. Paginated — defaults to page 0, size 20. */
     @GetMapping
-    public ResponseEntity<?> listJobs(OAuth2AuthenticationToken auth) {
+    public ResponseEntity<?> listJobs(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            OAuth2AuthenticationToken auth) {
+
+        int safeSize = Math.min(size, 100); // cap page size
         return resolveUser(auth)
                 .map(user -> {
-                    List<AnalysisJob> jobs = jobRepository.findByUserOrderByCreatedAtDesc(user);
-                    // Enrich each with live Redis status
-                    jobs.forEach(job -> {
+                    var pageable = org.springframework.data.domain.PageRequest.of(page, safeSize);
+                    var jobPage = jobRepository.findByUser(user, pageable);
+                    // Enrich with live Redis status
+                    jobPage.forEach(job -> {
                         JobStatus liveStatus = jobStateService.getStatus(job.getId());
                         if (liveStatus != null && liveStatus != job.getStatus()) {
                             job.setStatus(liveStatus);
                         }
                     });
-                    return ResponseEntity.ok(jobs.stream().map(this::toDto).toList());
+                    var body = java.util.Map.of(
+                            "content", jobPage.stream().map(this::toDto).toList(),
+                            "page", jobPage.getNumber(),
+                            "size", jobPage.getSize(),
+                            "totalElements", jobPage.getTotalElements(),
+                            "totalPages", jobPage.getTotalPages(),
+                            "last", jobPage.isLast()
+                    );
+                    return ResponseEntity.ok(body);
                 })
                 .orElse(ResponseEntity.status(401).build());
     }
