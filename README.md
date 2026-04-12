@@ -2,8 +2,6 @@
 
 A developer tool that analyzes GitHub repositories and generates recruiter-ready portfolio content — resume bullets, portfolio summaries, and interview narratives — by extracting structured evidence from build files, commit history, and GitHub API signals before calling the LLM.
 
-Built as a flagship portfolio project demonstrating full-stack engineering, async job processing, event-driven architecture, and production-grade backend design.
-
 ---
 
 ## The Core Idea
