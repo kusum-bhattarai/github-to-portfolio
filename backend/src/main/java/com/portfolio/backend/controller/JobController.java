@@ -28,10 +28,11 @@ public class JobController {
         return resolveUser(auth)
                 .map(user -> jobRepository.findByIdAndUser(jobId, user)
                         .map(job -> {
-                            // Enrich with fresh Redis status (may be more current than DB snapshot)
-                            JobStatus liveStatus = jobStateService.getStatus(jobId);
-                            if (liveStatus != null && liveStatus != job.getStatus()) {
-                                job.setStatus(liveStatus);
+                            if (!job.getStatus().isTerminal()) {
+                                JobStatus liveStatus = jobStateService.getStatus(jobId);
+                                if (liveStatus != null && liveStatus != job.getStatus()) {
+                                    job.setStatus(liveStatus);
+                                }
                             }
                             return ResponseEntity.ok(toDto(job));
                         })
@@ -51,11 +52,13 @@ public class JobController {
                 .map(user -> {
                     var pageable = org.springframework.data.domain.PageRequest.of(page, safeSize);
                     var jobPage = jobRepository.findByUser(user, pageable);
-                    // Enrich with live Redis status
+                    // Enrich active jobs with live Redis status (skip terminal — DB wins)
                     jobPage.forEach(job -> {
-                        JobStatus liveStatus = jobStateService.getStatus(job.getId());
-                        if (liveStatus != null && liveStatus != job.getStatus()) {
-                            job.setStatus(liveStatus);
+                        if (!job.getStatus().isTerminal()) {
+                            JobStatus liveStatus = jobStateService.getStatus(job.getId());
+                            if (liveStatus != null && liveStatus != job.getStatus()) {
+                                job.setStatus(liveStatus);
+                            }
                         }
                     });
                     var body = java.util.Map.of(
