@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
 import { useCurrentUser } from '../hooks/useCurrentUser';
 import { useRepos, useSyncRepos } from '../hooks/useRepos';
-import { api } from '../lib/api';
+import { api, BACKEND_URL } from '../lib/api';
 import type { Repo } from '../lib/api';
 
 const LANGUAGE_COLORS: Record<string, string> = {
@@ -110,7 +110,7 @@ export default function DashboardPage() {
     });
   };
 
-  const handleLogout = () => { window.location.href = '/auth/logout'; };
+  const handleLogout = () => { window.location.href = `${BACKEND_URL}/auth/logout`; };
 
   return (
     <div className="min-h-screen bg-gray-950 text-white">

@@ -1,0 +1,35 @@
+# Copy this to terraform.tfvars (gitignored) and fill in your values.
+# Run: cp infra/terraform.tfvars.example infra/terraform.tfvars
+
+gcp_project_id = "your-gcp-project-id"
+region         = "us-central1"
+
+# Neon Postgres — from neon.tech dashboard > Connection Details > JDBC
+database_url = "jdbc:postgresql://ep-xxx.us-east-2.aws.neon.tech/neondb?sslmode=require"
+db_username  = "your_neon_username"
+db_password  = "your_neon_password"
+
+# Upstash Redis — from upstash.com > Redis > your DB > Details
+redis_host     = "your-db.upstash.io"
+redis_password = "your_upstash_redis_password"
+
+# Upstash Kafka — from upstash.com > Kafka > your cluster > Details
+kafka_bootstrap_servers = "your-cluster.upstash.io:9092"
+kafka_username          = "your_upstash_kafka_username"
+kafka_password          = "your_upstash_kafka_password"
+
+# GitHub OAuth App — github.com/settings/developers
+github_client_id     = "your_github_client_id"
+github_client_secret = "your_github_client_secret"
+
+# Generate with: openssl rand -base64 32
+token_encryption_key = "your_base64_32_byte_key"
+
+# OpenAI API key
+llm_api_key = "sk-proj-..."
+
+# Your Vercel frontend URL (from vercel.com dashboard after deploying)
+frontend_url = "https://your-app.vercel.app"
+
+# Leave empty on first deploy — fill in after running: make url
+backend_url = ""

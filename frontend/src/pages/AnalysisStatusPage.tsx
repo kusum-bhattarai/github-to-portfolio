@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { api, BACKEND_URL } from '../lib/api';
 import type { AnalysisJob, JobStatus } from '../lib/api';
 import { useCurrentUser } from '../hooks/useCurrentUser';
 
@@ -144,7 +144,7 @@ export default function AnalysisStatusPage() {
           )}
           <span className="text-gray-300 text-sm">{user?.username}</span>
           <button
-            onClick={() => { window.location.href = '/auth/logout'; }}
+            onClick={() => { window.location.href = `${BACKEND_URL}/auth/logout`; }}
             className="text-sm text-gray-400 hover:text-white transition-colors"
           >
             Log out

@@ -66,8 +66,10 @@ export interface AnalysisJob {
   errorMessage: string | null;
 }
 
+export const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? '';
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(path, { credentials: 'include', ...options });
+  const res = await fetch(`${BACKEND_URL}${path}`, { credentials: 'include', ...options });
   if (!res.ok) {
     const err = new Error(`HTTP ${res.status}`);
     (err as Error & { status: number }).status = res.status;
