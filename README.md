@@ -2,6 +2,8 @@
 
 A developer tool that analyzes GitHub repositories and generates recruiter-ready portfolio content — resume bullets, portfolio summaries, and interview narratives — by extracting structured evidence from build files, commit history, and GitHub API signals before calling the LLM.
 
+**Live:** [github-to-portfolio-neon.vercel.app](https://github-to-portfolio-neon.vercel.app) · Backend: GCP Cloud Run · DB: Neon · Cache: Upstash Redis
+
 ---
 
 ## The Core Idea
@@ -15,11 +17,11 @@ Most portfolio generators pass the README to an LLM and hope for the best. This 
 ```mermaid
 graph TD
     User["User (Browser)"]
-    FE["React + TypeScript<br/>Frontend (Vite + Tailwind)"]
-    BE["Spring Boot 3<br/>Backend API"]
-    PG["PostgreSQL 16<br/>(Flyway migrations)"]
-    Redis["Redis 7<br/>(job state cache)"]
-    Kafka["Apache Kafka 3.7<br/>(KRaft mode)"]
+    FE["React + TypeScript<br/>Frontend<br/>Vercel"]
+    BE["Spring Boot 3<br/>Backend API<br/>GCP Cloud Run"]
+    PG["PostgreSQL<br/>Neon (serverless)"]
+    Redis["Redis<br/>Upstash"]
+    Kafka["Apache Kafka<br/>Confluent Cloud"]
     GitHub["GitHub API"]
     LLM["OpenAI GPT-4o-mini"]
 
@@ -28,61 +30,50 @@ graph TD
     BE -->|"OAuth2 + repo data"| GitHub
     BE -->|"structured prompt"| LLM
     BE -->|"entities + content"| PG
-    BE -->|"job status"| Redis
-    BE -->|"analysis events"| Kafka
-    Kafka -->|"consume stages"| BE
+    BE -->|"job status cache"| Redis
+    BE -.->|"analysis events<br/>(horizontal scale)"| Kafka
 ```
 
 ---
 
-## Kafka Analysis Pipeline
+## Analysis Pipeline
 
-The analysis pipeline is split into four independent stages communicating via Kafka topics. Each stage runs in its own consumer group and can scale, retry, and fail independently.
+Analysis jobs run on a Spring `@Async` thread pool (`analysisExecutor`, core=3, max=6). Each job executes three phases in sequence — evidence extraction, LLM generation, and persistence — with automatic retry (up to 3 attempts, exponential backoff).
 
 ```mermaid
 sequenceDiagram
     participant C as Controller
-    participant K1 as repo.analysis.requested
-    participant ES as ExtractionStage
-    participant K2 as repo.evidence.extracted
-    participant GS as GenerationStage
-    participant K3 as repo.generation.completed
-    participant PS as PersistenceStage
-    participant DLQ as repo.generation.failed
-    participant DL as DeadLetterConsumer
+    participant W as AsyncAnalysisWorker
+    participant EE as EvidenceExtractor
+    participant LLM as LlmService
+    participant DB as PostgreSQL
 
-    C->>K1: publish {jobId, repoId, userId}
-    K1->>ES: consume
-    ES->>ES: fetch GitHub data<br/>build RepoSnapshot
-    ES->>K2: publish {jobId, evidence payload}
-    K2->>GS: consume
-    GS->>GS: call LLM with<br/>structured prompt
-    GS->>K3: publish {jobId, generated content}
-    K3->>PS: consume
-    PS->>PS: write to DB<br/>mark job COMPLETED
-
-    Note over ES,DL: On any stage failure:
-    ES-->>DLQ: publish {stage, attempt}
-    GS-->>DLQ: publish {stage, attempt}
-    PS-->>DLQ: publish {stage, attempt}
-    DLQ->>DL: consume
-    DL-->>K1: re-enqueue if attempt < 3
-    DL-->>PS: mark FAILED if attempt >= 3
+    C->>W: run(jobId, repoId, userId) [@Async]
+    W->>DB: transition → PROCESSING
+    W->>EE: extract(repo, token)
+    note over EE: Parallel GitHub API calls:<br/>file tree · README · config files<br/>commit count · contributors<br/>language bytes · recent commits
+    EE-->>W: ExtractionResult
+    W->>LLM: generate(repo, evidence)
+    LLM-->>W: GeneratedPortfolioContent
+    W->>DB: save RepoSnapshot + GeneratedContent
+    W->>DB: transition → COMPLETED
 ```
+
+A Kafka pipeline (`ExtractionStageConsumer` → `GenerationStageConsumer` → `PersistenceStageConsumer`) is implemented for horizontal scaling scenarios where multiple Cloud Run instances process jobs independently. On the current single-instance deployment, the `@Async` path is used to avoid Kafka consumer group rebalancing overhead on cold starts.
 
 ---
 
 ## Evidence Extraction Engine
 
-The extraction engine is the technical core. It collects signals from seven GitHub API endpoints and parses them into a typed `RepoSnapshot` before any LLM call.
+The extraction engine collects signals from seven GitHub API endpoints concurrently and parses them into a typed `RepoSnapshot` before any LLM call.
 
 ```mermaid
 graph LR
-    subgraph "GitHub API Calls"
+    subgraph "GitHub API (parallel)"
         A["File tree<br/>(structure signals)"]
         B["README<br/>(up to 4KB)"]
         C["Raw config files<br/>pom.xml · package.json<br/>Dockerfile · GH Actions"]
-        D["Commit history<br/>(last 50 messages)"]
+        D["Commit history<br/>(last 30 messages)"]
         E["Language bytes<br/>(breakdown %)"]
         F["Contributors list"]
         G["Repo metadata<br/>(stars, forks, dates)"]
@@ -186,11 +177,11 @@ erDiagram
 
 ```mermaid
 stateDiagram-v2
-    [*] --> QUEUED : job created
-    QUEUED --> PROCESSING : ExtractionStage picks up
-    PROCESSING --> COMPLETED : PersistenceStage writes content
-    PROCESSING --> RETRYING : DeadLetterConsumer re-enqueues
-    RETRYING --> PROCESSING : re-consumed by ExtractionStage
+    [*] --> QUEUED : job submitted
+    QUEUED --> PROCESSING : worker picks up
+    PROCESSING --> COMPLETED : content saved to DB
+    PROCESSING --> RETRYING : transient failure, backoff
+    RETRYING --> PROCESSING : retry attempt
     PROCESSING --> FAILED : 3 attempts exhausted
     RETRYING --> FAILED : 3 attempts exhausted
     COMPLETED --> [*]
@@ -198,7 +189,7 @@ stateDiagram-v2
 ```
 
 Job status is written to **both Redis and PostgreSQL** on every transition:
-- **Redis** — O(1) reads for the frontend polling loop (24h TTL)
+- **Redis** — O(1) reads for the frontend polling loop (24h TTL). Terminal states (COMPLETED/FAILED) always read from DB to prevent stale cache overrides.
 - **PostgreSQL** — durable history, source of truth after Redis eviction
 
 ---
@@ -209,21 +200,65 @@ Job status is written to **both Redis and PostgreSQL** on every transition:
 |---|---|
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, TanStack Query |
 | Backend | Spring Boot 3.5, Java 21, Spring Security (OAuth2), Spring Data JPA |
-| Messaging | Apache Kafka 3.7 (KRaft — no Zookeeper) |
-| Database | PostgreSQL 16, Flyway (7 migrations) |
-| Cache / Job State | Redis 7 |
+| Database | PostgreSQL (Neon serverless), Flyway (7 migrations) |
+| Cache / Job State | Redis (Upstash) |
+| Messaging | Apache Kafka (Confluent Cloud, SASL/SSL) |
 | LLM | OpenAI GPT-4o-mini via openai-java SDK |
-| Containerization | Docker, Docker Compose (multi-stage builds) |
-| CI/CD | GitHub Actions (backend: test + build + Docker; frontend: typecheck + lint + build) |
+| Containerization | Docker (multi-stage build), Docker Compose (local dev) |
+| Infrastructure | GCP Cloud Run, Artifact Registry, Terraform |
+| Frontend Hosting | Vercel |
+| CI/CD | GitHub Actions (backend: test + build; frontend: typecheck + lint + build) |
 
 ---
 
-## Getting Started
+## Production Deployment
+
+The app runs on free-tier infrastructure:
+
+| Service | Provider | Notes |
+|---|---|---|
+| Backend | GCP Cloud Run | Scale-to-zero, 1 GiB RAM, `prod` Spring profile |
+| Frontend | Vercel | Static SPA, SPA catch-all rewrite |
+| Database | Neon | Serverless Postgres, connection pooling |
+| Redis | Upstash | Session store + job state cache, TLS |
+| Kafka | Confluent Cloud | SASL PLAIN over SSL |
+
+### Deploy from scratch
+
+**Prerequisites:** GCP project, Neon DB, Upstash Redis, Confluent Cloud Kafka, GitHub OAuth App, OpenAI API key.
+
+```bash
+# 1. Configure
+cp infra/terraform.tfvars.example infra/terraform.tfvars
+# fill in all values
+
+# 2. Auth + init
+make setup
+
+# 3. Create Artifact Registry, build image, deploy Cloud Run
+make first-deploy
+
+# 4. Copy the Cloud Run URL into terraform.tfvars as backend_url, then:
+make deploy
+```
+
+### Redeploy after code changes
+
+```bash
+make push    # build + push :latest to Artifact Registry
+gcloud run deploy portfolio-backend \
+  --image us-central1-docker.pkg.dev/<project>/portfolio-backend/backend:latest \
+  --region us-central1 --project <project>
+```
+
+---
+
+## Local Development
 
 ### Prerequisites
 
 - Docker + Docker Compose
-- A GitHub OAuth App ([create one here](https://github.com/settings/developers))
+- A GitHub OAuth App ([create one](https://github.com/settings/developers))
   - Homepage URL: `http://localhost:3000`
   - Callback URL: `http://localhost:8080/login/oauth2/code/github`
 - An OpenAI API key
@@ -240,16 +275,12 @@ LLM_API_KEY=your_openai_api_key
 POSTGRES_PASSWORD=portfolio_dev
 ```
 
-### 2. Start infrastructure (dev mode — recommended)
+### 2. Start infrastructure + run services
 
 ```bash
-# Starts postgres + redis + kafka only
+# Start postgres + redis + kafka
 docker compose up -d
-```
 
-Then run each service locally:
-
-```bash
 # Terminal 1 — backend
 cd backend && ./mvnw spring-boot:run
 
@@ -274,10 +305,10 @@ docker compose --profile full up --build
 | `GET` | `/api/me` | Current authenticated user |
 | `POST` | `/api/repos/sync` | Sync GitHub repositories |
 | `GET` | `/api/repos` | List synced repositories |
-| `POST` | `/api/repos/analyze/batch` | Submit batch analysis (returns job IDs) |
+| `POST` | `/api/repos/analyze/batch` | Submit batch analysis |
 | `POST` | `/api/repos/{repoId}/analyze` | Reanalyze a single repo |
-| `GET` | `/api/jobs/{jobId}` | Poll job status |
 | `GET` | `/api/jobs` | Paginated job list |
+| `GET` | `/api/jobs/{jobId}` | Poll single job status |
 | `GET` | `/api/projects` | All analyzed projects (workspace) |
 | `GET` | `/api/projects/{repoId}/content` | Generated content for a repo |
 | `PUT` | `/api/projects/{repoId}/content/{id}` | Save inline edit |
@@ -289,14 +320,17 @@ docker compose --profile full up --build
 **Why separate evidence extraction from LLM generation?**
 Without structured evidence, the LLM hallucinates specifics and produces generic bullets. By parsing `pom.xml` for dependency counts, commits for feature signals, and the GitHub API for contributor and language data, the prompt contains concrete facts. The model's job becomes formatting, not guessing.
 
-**Why Kafka instead of `@Async` threads?**
-`@Async` runs the full pipeline in one thread — extraction + generation + persistence fail or succeed together. Kafka decouples them: a transient GitHub API failure only retries the extraction stage, not the LLM call. Independent consumer groups also let each stage scale horizontally without touching others.
+**Why parallelize GitHub API calls?**
+The extraction phase makes 8–12 GitHub API calls (README, file tree, config files, commit count, contributors, language bytes, recent commits). Running them sequentially adds 3–5 seconds of pure wait time. Using `CompletableFuture.allOf()` for the independent calls (everything except file tree, which gates config parsing) cuts extraction to ~1–2 seconds.
+
+**Why `@Async` instead of the Kafka pipeline on Cloud Run?**
+The Kafka pipeline was designed for horizontal scaling: independent consumer groups let each stage (extraction, generation, persistence) scale and retry separately. On a single Cloud Run instance with scale-to-zero, though, all four consumer groups rebalance with Confluent Cloud on every cold start — each taking 30–60 seconds. That overhead makes the first analysis after an idle period take 2–4 minutes before any work starts. The `@Async` worker runs the full pipeline on a local thread pool (no network round-trips for job dispatch), and the Kafka infrastructure remains in place for when horizontal scaling is needed.
 
 **Why dual-write to Redis and PostgreSQL for job state?**
-Redis makes frontend polling cheap (no DB query per poll, O(1) key lookup). PostgreSQL ensures job history survives Redis eviction. The tradeoff is two writes per state transition — accepted because jobs transition infrequently (3–5 times total).
+Redis makes frontend polling cheap (no DB query per poll, O(1) key lookup). PostgreSQL ensures job history survives Redis eviction. Terminal states (COMPLETED/FAILED) always read from the DB so that manual resets via SQL are immediately reflected without waiting for Redis TTL expiry.
 
-**Why carry evidence inline in Kafka events?**
-Keeping evidence in the event message makes each consumer stateless — the generation stage needs no DB read to proceed. At this scale (hundreds of repos), 10–20 KB messages are acceptable. At higher volume, switching to S3/DB references would bound message size at the cost of an extra I/O hop.
+**Why cross-origin session cookies instead of JWTs?**
+The frontend (Vercel) and backend (Cloud Run) are on different origins. JWTs would require storing the token client-side and managing rotation. Instead, the backend uses `SameSite=None; Secure` session cookies backed by Redis (`spring-session-data-redis`), which survive Cloud Run scale-to-zero restarts and work naturally with Spring Security's existing OAuth2 session management.
 
 ---
 
@@ -306,7 +340,7 @@ Keeping evidence in the event message makes each consumer stateless — the gene
 github-to-portfolio/
 ├── backend/
 │   ├── src/main/java/com/portfolio/backend/
-│   │   ├── config/          # Security, async, app config
+│   │   ├── config/          # Security, async executor, app config
 │   │   ├── controller/      # REST endpoints
 │   │   ├── entity/          # JPA entities + enums
 │   │   ├── kafka/           # Topics, publisher, stage consumers, events
@@ -315,11 +349,15 @@ github-to-portfolio/
 │   └── src/main/resources/
 │       ├── application.yml  # local / docker / staging / prod profiles
 │       └── db/migration/    # Flyway V1–V7
-├── frontend/src/            # React + TypeScript
+├── frontend/
+│   ├── src/                 # React + TypeScript
+│   └── vercel.json          # SPA catch-all rewrite
+├── infra/
+│   ├── main.tf              # GCP Cloud Run + Artifact Registry
+│   ├── variables.tf
+│   ├── outputs.tf
+│   └── terraform.tfvars.example
+├── Makefile                 # setup · push · deploy · url targets
 ├── .github/workflows/       # Backend + frontend CI
-├── docker-compose.yml       # Full local stack
-└── docs/
-    ├── github_portfolio_action_plan.md
-    ├── github_portfolio_spec.md
-    └── interview_story.md   # Five-section interview narrative
+└── docker-compose.yml       # Full local stack
 ```
