@@ -49,7 +49,7 @@ public class AnalysisController {
                         return ResponseEntity.status(404).<Object>build();
                     }
                     AnalysisJob job = submitJob(user, repo);
-                    return ResponseEntity.ok(toJobDto(job));
+                    return ResponseEntity.ok(toJobDto(job, repo));
                 })
                 .orElse(ResponseEntity.status(401).build());
     }
@@ -79,7 +79,7 @@ public class AnalysisController {
                             UUID repoId = UUID.fromString(idStr);
                             Repository repo = repositoryRepository.findByIdAndUser(repoId, user).orElse(null);
                             if (repo == null) continue;
-                            jobs.add(toJobDto(submitJob(user, repo)));
+                            jobs.add(toJobDto(submitJob(user, repo), repo));
                         } catch (IllegalArgumentException ignored) { /* bad UUID */ }
                     }
                     return ResponseEntity.ok(jobs);
@@ -162,11 +162,11 @@ public class AnalysisController {
         return userRepository.findByGithubId(githubId);
     }
 
-    private Map<String, Object> toJobDto(AnalysisJob job) {
+    private Map<String, Object> toJobDto(AnalysisJob job, Repository repo) {
         Map<String, Object> dto = new LinkedHashMap<>();
         dto.put("jobId", job.getId());
-        dto.put("repoId", job.getRepository().getId());
-        dto.put("repoName", job.getRepository().getName());
+        dto.put("repoId", repo.getId());
+        dto.put("repoName", repo.getName());
         dto.put("status", job.getStatus().name());
         dto.put("createdAt", job.getCreatedAt());
         dto.put("startedAt", job.getStartedAt());
