@@ -1,5 +1,17 @@
 # GitHub Portfolio Intelligence Platform
 
+![Java](https://img.shields.io/badge/Java-21-orange.svg)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.5-brightgreen.svg)
+![React](https://img.shields.io/badge/React-19-61DAFB.svg)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6.svg)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Neon-336791.svg)
+![Redis](https://img.shields.io/badge/Redis-Upstash-DC382D.svg)
+![Kafka](https://img.shields.io/badge/Kafka-Confluent-231F20.svg)
+![Docker](https://img.shields.io/badge/build-Docker-2496ED.svg)
+![GCP](https://img.shields.io/badge/deploy-Cloud%20Run-4285F4.svg)
+![Vercel](https://img.shields.io/badge/frontend-Vercel-000000.svg)
+![OpenAI](https://img.shields.io/badge/LLM-GPT--4o--mini-412991.svg)
+
 A developer tool that analyzes GitHub repositories and generates recruiter-ready portfolio content — resume bullets, portfolio summaries, and interview narratives — by extracting structured evidence from build files, commit history, and GitHub API signals before calling the LLM.
 
 **Live:** [github-to-portfolio-neon.vercel.app](https://github-to-portfolio-neon.vercel.app) · Backend: GCP Cloud Run · DB: Neon · Cache: Upstash Redis
