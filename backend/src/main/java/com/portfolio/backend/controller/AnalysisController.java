@@ -10,8 +10,8 @@ import com.portfolio.backend.repository.AnalysisJobRepository;
 import com.portfolio.backend.repository.EditedContentRepository;
 import com.portfolio.backend.repository.RepositoryRepository;
 import com.portfolio.backend.repository.UserRepository;
-import com.portfolio.backend.kafka.KafkaAnalysisPublisher;
 import com.portfolio.backend.service.AnalysisService;
+import com.portfolio.backend.service.AsyncAnalysisWorker;
 import com.portfolio.backend.service.JobStateService;
 import com.portfolio.backend.service.RateLimitService;
 import lombok.RequiredArgsConstructor;
@@ -30,7 +30,7 @@ import java.util.*;
 public class AnalysisController {
 
     private final AnalysisService analysisService;
-    private final KafkaAnalysisPublisher kafkaPublisher;
+    private final AsyncAnalysisWorker asyncWorker;
     private final JobStateService jobStateService;
     private final AnalysisJobRepository jobRepository;
     private final RepositoryRepository repositoryRepository;
@@ -152,7 +152,7 @@ public class AnalysisController {
                 .build();
         AnalysisJob saved = jobRepository.save(job);
         jobStateService.seed(saved.getId(), JobStatus.QUEUED);
-        kafkaPublisher.publishAnalysisRequested(saved.getId(), repo.getId(), user.getId());
+        asyncWorker.run(saved.getId(), repo.getId(), user.getId());
         return saved;
     }
 

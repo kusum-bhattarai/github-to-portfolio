@@ -12,6 +12,7 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
@@ -54,14 +55,33 @@ public class EvidenceExtractor {
 
         log.info("Phase 4 evidence extraction starting for {}", repo.getFullName());
 
-        String readme = fetchReadme(owner, repoName, accessToken);
+        // Round 1: README and file tree in parallel (tree needed before config parsing)
+        CompletableFuture<String> readmeFuture = CompletableFuture.supplyAsync(
+                () -> fetchReadme(owner, repoName, accessToken));
         List<Map<String, Object>> tree = fetchFileTree(owner, repoName, accessToken);
+        String readme = readmeFuture.join();
 
         Map<String, Object> signals = detectSignals(tree, repo);
-        Map<String, Object> parsedDeps = parseConfigFiles(owner, repoName, accessToken, tree, signals);
-        Map<String, Object> metrics = fetchQuantitativeMetrics(owner, repoName, accessToken, tree, readme);
-        List<String> commitMessages = fetchRecentCommits(owner, repoName, accessToken);
-        Map<String, Object> commitSignals = parseCommitSignals(commitMessages);
+
+        // Round 2: all independent I/O in parallel
+        CompletableFuture<Map<String, Object>> depsFuture = CompletableFuture.supplyAsync(
+                () -> parseConfigFiles(owner, repoName, accessToken, tree, signals));
+        CompletableFuture<Integer> commitCountFuture = CompletableFuture.supplyAsync(
+                () -> fetchCommitCount(owner, repoName, accessToken));
+        CompletableFuture<Integer> contributorFuture = CompletableFuture.supplyAsync(
+                () -> fetchContributorCount(owner, repoName, accessToken));
+        CompletableFuture<Map<String, Object>> langFuture = CompletableFuture.supplyAsync(
+                () -> fetchLanguageBreakdown(owner, repoName, accessToken));
+        CompletableFuture<List<String>> commitsFuture = CompletableFuture.supplyAsync(
+                () -> fetchRecentCommits(owner, repoName, accessToken));
+
+        CompletableFuture.allOf(depsFuture, commitCountFuture, contributorFuture, langFuture, commitsFuture).join();
+
+        Map<String, Object> parsedDeps = depsFuture.join();
+        Map<String, Object> metrics = buildMetrics(
+                tree, readme, commitCountFuture.join(), contributorFuture.join(), langFuture.join());
+        Map<String, Object> commitSignals = parseCommitSignals(commitsFuture.join());
+
         List<String> stack = buildStack(repo, signals, parsedDeps);
         String projectType = classifyProjectType(repo, signals, parsedDeps, stack);
 
@@ -541,15 +561,12 @@ public class EvidenceExtractor {
 
     // ─── Quantitative metrics ─────────────────────────────────────────────────
 
-    private Map<String, Object> fetchQuantitativeMetrics(
-            String owner, String repoName, String token,
-            List<Map<String, Object>> tree, String readme) {
+    private Map<String, Object> buildMetrics(
+            List<Map<String, Object>> tree, String readme,
+            int commitCount, int contributorCount, Map<String, Object> langBytes) {
 
         Map<String, Object> metrics = new LinkedHashMap<>();
 
-        // ── Class-level counts (more meaningful than raw file counts) ─────────
-
-        // Test class count
         long testClassCount = tree.stream()
                 .map(n -> ((String) n.getOrDefault("path", "")).toLowerCase())
                 .filter(p -> !p.contains("node_modules"))
@@ -560,7 +577,6 @@ public class EvidenceExtractor {
                 .count();
         if (testClassCount > 0) metrics.put("testClassCount", testClassCount);
 
-        // Entity / model class count
         long entityClassCount = tree.stream()
                 .map(n -> (String) n.getOrDefault("path", ""))
                 .filter(p -> {
@@ -574,7 +590,6 @@ public class EvidenceExtractor {
                 .count();
         if (entityClassCount > 0) metrics.put("entityClassCount", entityClassCount);
 
-        // Controller / handler class count
         long controllerClassCount = tree.stream()
                 .map(n -> (String) n.getOrDefault("path", ""))
                 .filter(p -> {
@@ -590,7 +605,6 @@ public class EvidenceExtractor {
                 .count();
         if (controllerClassCount > 0) metrics.put("controllerClassCount", controllerClassCount);
 
-        // Service class count
         long serviceClassCount = tree.stream()
                 .map(n -> (String) n.getOrDefault("path", ""))
                 .filter(p -> {
@@ -604,24 +618,17 @@ public class EvidenceExtractor {
                 .count();
         if (serviceClassCount > 0) metrics.put("serviceClassCount", serviceClassCount);
 
-        // ── GitHub API metrics ────────────────────────────────────────────────
-        metrics.put("commitCount", fetchCommitCount(owner, repoName, token));
-        metrics.put("contributorCount", fetchContributorCount(owner, repoName, token));
-
-        // Language breakdown in bytes (for % breakdown in prompt)
-        Map<String, Object> langBytes = fetchLanguageBreakdown(owner, repoName, token);
+        metrics.put("commitCount", commitCount);
+        metrics.put("contributorCount", contributorCount);
         metrics.put("languageBytes", langBytes);
 
-        // ── README-scraped metrics ────────────────────────────────────────────
         if (!readme.isBlank()) {
             Map<String, Object> readmeMetrics = extractReadmeMetrics(readme);
             if (!readmeMetrics.isEmpty()) metrics.put("readmeMetrics", readmeMetrics);
         }
 
-        log.debug("Quantitative metrics for {}/{}: {} commits, {} contributors, {} test classes, {} entities",
-                owner, repoName,
-                metrics.get("commitCount"), metrics.get("contributorCount"),
-                testClassCount, entityClassCount);
+        log.debug("Quantitative metrics: {} commits, {} contributors, {} test classes, {} entities",
+                commitCount, contributorCount, testClassCount, entityClassCount);
 
         return metrics;
     }
@@ -632,7 +639,6 @@ public class EvidenceExtractor {
      */
     private Map<String, Object> extractReadmeMetrics(String readme) {
         Map<String, Object> found = new LinkedHashMap<>();
-        String text = readme.toLowerCase();
 
         // Test coverage percentage — "87% coverage", "coverage: 87%", badge text
         var coveragePattern = java.util.regex.Pattern.compile(
