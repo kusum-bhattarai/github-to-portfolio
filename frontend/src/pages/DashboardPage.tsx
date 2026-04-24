@@ -123,6 +123,12 @@ export default function DashboardPage() {
           )}
           <span className="text-gray-300 text-sm">{user?.username}</span>
           <button
+            onClick={() => navigate('/status')}
+            className="text-sm text-gray-400 hover:text-white transition-colors"
+          >
+            Queue
+          </button>
+          <button
             onClick={() => navigate('/workspace')}
             className="text-sm text-gray-400 hover:text-white transition-colors"
           >

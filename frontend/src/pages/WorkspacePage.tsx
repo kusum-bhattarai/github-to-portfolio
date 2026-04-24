@@ -164,6 +164,18 @@ export default function WorkspacePage() {
           )}
           <span className="text-gray-300 text-sm">{user?.username}</span>
           <button
+            onClick={() => navigate('/dashboard')}
+            className="text-sm text-gray-400 hover:text-white transition-colors"
+          >
+            Dashboard
+          </button>
+          <button
+            onClick={() => navigate('/status')}
+            className="text-sm text-gray-400 hover:text-white transition-colors"
+          >
+            Queue
+          </button>
+          <button
             onClick={() => { window.location.href = `${BACKEND_URL}/auth/logout`; }}
             className="text-sm text-gray-400 hover:text-white transition-colors"
           >
