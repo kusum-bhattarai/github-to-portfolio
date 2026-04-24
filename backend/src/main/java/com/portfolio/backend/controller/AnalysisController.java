@@ -44,8 +44,8 @@ public class AnalysisController {
     public ResponseEntity<?> analyze(@PathVariable UUID repoId, OAuth2AuthenticationToken auth) {
         return resolveUser(auth)
                 .map(user -> {
-                    Repository repo = repositoryRepository.findById(repoId).orElse(null);
-                    if (repo == null || !repo.getUser().getId().equals(user.getId())) {
+                    Repository repo = repositoryRepository.findByIdAndUser(repoId, user).orElse(null);
+                    if (repo == null) {
                         return ResponseEntity.status(404).<Object>build();
                     }
                     AnalysisJob job = submitJob(user, repo);
@@ -77,8 +77,8 @@ public class AnalysisController {
                     for (String idStr : repoIdStrings) {
                         try {
                             UUID repoId = UUID.fromString(idStr);
-                            Repository repo = repositoryRepository.findById(repoId).orElse(null);
-                            if (repo == null || !repo.getUser().getId().equals(user.getId())) continue;
+                            Repository repo = repositoryRepository.findByIdAndUser(repoId, user).orElse(null);
+                            if (repo == null) continue;
                             jobs.add(toJobDto(submitJob(user, repo)));
                         } catch (IllegalArgumentException ignored) { /* bad UUID */ }
                     }

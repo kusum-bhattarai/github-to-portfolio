@@ -11,4 +11,5 @@ import java.util.UUID;
 public interface RepositoryRepository extends JpaRepository<Repository, UUID> {
     List<Repository> findByUserOrderByStarsDesc(User user);
     Optional<Repository> findByUserAndGithubRepoId(User user, Long githubRepoId);
+    Optional<Repository> findByIdAndUser(UUID id, User user);
 }
