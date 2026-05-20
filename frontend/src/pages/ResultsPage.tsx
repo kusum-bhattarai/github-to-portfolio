@@ -1,11 +1,9 @@
 import { useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, BACKEND_URL } from '../lib/api';
+import { api } from '../lib/api';
 import type { AnalysisJob, ContentBlock, ContentType } from '../lib/api';
-import { useCurrentUser } from '../hooks/useCurrentUser';
-
-// ── Copy button ───────────────────────────────────────────────────────────────
+import Layout from '../components/Layout';
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -15,22 +13,119 @@ function CopyButton({ text }: { text: string }) {
     setTimeout(() => setCopied(false), 2000);
   };
   return (
-    <button onClick={copy} className="text-xs text-gray-500 hover:text-white transition-colors">
-      {copied ? 'Copied!' : 'Copy'}
+    <button
+      onClick={copy}
+      className="text-xs transition-colors"
+      style={{ color: copied ? 'var(--green)' : 'var(--text-muted)' }}
+      onMouseEnter={e => { if (!copied) (e.currentTarget as HTMLElement).style.color = 'var(--text-primary)'; }}
+      onMouseLeave={e => { if (!copied) (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'; }}
+    >
+      {copied ? '✓ Copied' : 'Copy'}
     </button>
   );
 }
 
-// ── Content card with inline editing ─────────────────────────────────────────
+const CONTENT_LABELS: Record<ContentType, string> = {
+  PORTFOLIO_SUMMARY: 'Portfolio Summary',
+  RESUME_BULLETS:    'Resume Bullets',
+  TECH_STACK:        'Tech Stack',
+  PROJECT_TAGS:      'Project Tags',
+  ONE_SENTENCE_PITCH:'One-Sentence Pitch',
+  TALKING_POINTS:    'Talking Points',
+  INTERVIEW_STORY:   'Interview Story',
+};
+
+const EDIT_ROWS: Partial<Record<ContentType, number>> = {
+  PORTFOLIO_SUMMARY: 4,
+  INTERVIEW_STORY:   14,
+  TALKING_POINTS:    10,
+  RESUME_BULLETS:    8,
+};
+
+function renderContent(block: ContentBlock) {
+  const text = block.editedText ?? block.generatedText;
+
+  if (block.contentType === 'RESUME_BULLETS' || block.contentType === 'TALKING_POINTS') {
+    return (
+      <ul className="space-y-2">
+        {text.split('\n').filter(Boolean).map((b, i) => (
+          <li key={i} className="flex gap-2.5 text-sm leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+            <span className="shrink-0 mt-1 w-1.5 h-1.5 rounded-full" style={{ background: 'var(--accent)' }} />
+            <span>{b.replace(/^[-•]\s*/, '')}</span>
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  if (block.contentType === 'TECH_STACK' || block.contentType === 'PROJECT_TAGS') {
+    return (
+      <div className="flex flex-wrap gap-2">
+        {text.split(',').map(s => s.trim()).filter(Boolean).map(item => (
+          <span
+            key={item}
+            className="px-2.5 py-1 rounded-lg text-xs font-mono-dm"
+            style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}
+          >
+            {item}
+          </span>
+        ))}
+      </div>
+    );
+  }
+  if (block.contentType === 'ONE_SENTENCE_PITCH') {
+    return (
+      <p
+        className="text-base font-medium leading-relaxed font-display italic"
+        style={{ color: 'var(--text-primary)' }}
+      >
+        "{text}"
+      </p>
+    );
+  }
+  if (block.contentType === 'INTERVIEW_STORY') {
+    return (
+      <div className="space-y-4">
+        {text.split(/\n\n+/).filter(Boolean).map((section, i) => {
+          const colon = section.indexOf(':');
+          if (colon !== -1) {
+            const label = section.slice(0, colon).trim();
+            const body  = section.slice(colon + 1).trim();
+            return (
+              <div key={i}>
+                <p
+                  className="text-[10px] font-semibold uppercase tracking-widest mb-1 font-mono-dm"
+                  style={{ color: 'var(--accent)' }}
+                >
+                  {label}
+                </p>
+                <p className="text-sm leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+                  {body}
+                </p>
+              </div>
+            );
+          }
+          return (
+            <p key={i} className="text-sm leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+              {section}
+            </p>
+          );
+        })}
+      </div>
+    );
+  }
+  return (
+    <p className="text-sm leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+      {text}
+    </p>
+  );
+}
 
 function ContentCard({
-  block,
-  repoId,
-  onSaved,
+  block, repoId, onSaved,
 }: {
   block: ContentBlock;
   repoId: string;
-  onSaved: (contentId: string, newText: string) => void;
+  onSaved: (id: string, text: string) => void;
 }) {
   const displayText = block.editedText ?? block.generatedText;
   const [editing, setEditing] = useState(false);
@@ -38,192 +133,116 @@ function ContentCard({
 
   const saveMutation = useMutation({
     mutationFn: (text: string) => api.projects.saveEdit(repoId, block.id, text),
-    onSuccess: () => {
-      onSaved(block.id, draft);
-      setEditing(false);
-    },
+    onSuccess: () => { onSaved(block.id, draft); setEditing(false); },
   });
 
-  const handleEdit = () => {
-    setDraft(displayText);
-    setEditing(true);
-  };
-
-  const handleCancel = () => {
-    setDraft(displayText);
-    setEditing(false);
-  };
-
-  const labels: Record<ContentType, string> = {
-    PORTFOLIO_SUMMARY: 'Portfolio Summary',
-    RESUME_BULLETS: 'Resume Bullets',
-    TECH_STACK: 'Tech Stack',
-    PROJECT_TAGS: 'Project Tags',
-    ONE_SENTENCE_PITCH: 'One-Sentence Pitch',
-    TALKING_POINTS: 'Talking Points',
-    INTERVIEW_STORY: 'Interview Story',
-  };
-
-  const editRows: Partial<Record<ContentType, number>> = {
-    PORTFOLIO_SUMMARY: 4,
-    INTERVIEW_STORY: 14,
-    TALKING_POINTS: 10,
-    RESUME_BULLETS: 8,
-  };
-
-  const renderContent = () => {
-    if (block.contentType === 'RESUME_BULLETS' || block.contentType === 'TALKING_POINTS') {
-      const bullets = displayText.split('\n').filter(Boolean);
-      return (
-        <ul className="space-y-2">
-          {bullets.map((b, i) => (
-            <li key={i} className="flex gap-2 text-gray-300 text-sm">
-              <span className="text-violet-400 mt-0.5 shrink-0">•</span>
-              <span>{b.replace(/^[-•]\s*/, '')}</span>
-            </li>
-          ))}
-        </ul>
-      );
-    }
-    if (block.contentType === 'TECH_STACK' || block.contentType === 'PROJECT_TAGS') {
-      const items = displayText.split(',').map(s => s.trim()).filter(Boolean);
-      return (
-        <div className="flex flex-wrap gap-2">
-          {items.map(item => (
-            <span key={item} className="px-2.5 py-1 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-300">
-              {item}
-            </span>
-          ))}
-        </div>
-      );
-    }
-    if (block.contentType === 'ONE_SENTENCE_PITCH') {
-      return (
-        <p className="text-gray-100 text-base font-medium leading-relaxed italic">
-          "{displayText}"
-        </p>
-      );
-    }
-    if (block.contentType === 'INTERVIEW_STORY') {
-      // Render each labeled section as its own block
-      const sections = displayText.split(/\n\n+/).filter(Boolean);
-      return (
-        <div className="space-y-4">
-          {sections.map((section, i) => {
-            const colonIdx = section.indexOf(':');
-            if (colonIdx !== -1) {
-              const label = section.slice(0, colonIdx).trim();
-              const body = section.slice(colonIdx + 1).trim();
-              return (
-                <div key={i}>
-                  <p className="text-xs font-semibold text-violet-400 uppercase tracking-wider mb-1">{label}</p>
-                  <p className="text-gray-300 text-sm leading-relaxed">{body}</p>
-                </div>
-              );
-            }
-            return <p key={i} className="text-gray-300 text-sm leading-relaxed">{section}</p>;
-          })}
-        </div>
-      );
-    }
-    return <p className="text-gray-300 text-sm leading-relaxed">{displayText}</p>;
-  };
-
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+    <div
+      className="rounded-xl p-5 transition-all duration-150"
+      style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
+    >
       {/* Header */}
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold text-white uppercase tracking-wider">
-            {labels[block.contentType] ?? block.contentType}
-          </h3>
+          <span
+            className="text-xs font-semibold uppercase tracking-widest font-mono-dm"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            {CONTENT_LABELS[block.contentType] ?? block.contentType}
+          </span>
           {block.isEdited && (
-            <span className="px-1.5 py-0.5 text-[10px] font-medium bg-violet-950 text-violet-400 border border-violet-800/50 rounded">
-              Edited
+            <span
+              className="px-1.5 py-0.5 text-[10px] font-medium rounded font-mono-dm"
+              style={{ background: 'var(--accent-glow)', border: '1px solid var(--accent-border)', color: 'var(--accent)' }}
+            >
+              edited
             </span>
           )}
         </div>
-        <div className="flex items-center gap-3">
-          {!editing && (
-            <>
-              <CopyButton text={displayText} />
-              <button
-                onClick={handleEdit}
-                className="text-xs text-gray-500 hover:text-white transition-colors"
-              >
-                Edit
-              </button>
-            </>
-          )}
-        </div>
+        {!editing && (
+          <div className="flex items-center gap-3">
+            <CopyButton text={displayText} />
+            <button
+              onClick={() => { setDraft(displayText); setEditing(true); }}
+              className="text-xs transition-colors"
+              style={{ color: 'var(--text-muted)' }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = 'var(--text-primary)'; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'; }}
+            >
+              Edit
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Editing mode */}
       {editing ? (
         <div className="space-y-3">
           <textarea
             value={draft}
             onChange={e => setDraft(e.target.value)}
-            rows={editRows[block.contentType] ?? 6}
-            className="w-full bg-gray-800 border border-gray-700 focus:border-violet-500 rounded-lg px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 resize-y outline-none transition-colors"
+            rows={EDIT_ROWS[block.contentType] ?? 6}
+            className="w-full px-3 py-2.5 rounded-lg text-sm leading-relaxed outline-none resize-y transition-all font-mono-dm"
+            style={{
+              background: 'var(--bg-surface)',
+              border: '1px solid var(--border-light)',
+              color: 'var(--text-primary)',
+            }}
+            onFocus={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--accent-border)'; }}
+            onBlur={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-light)'; }}
             autoFocus
           />
           <div className="flex items-center gap-2">
             <button
               onClick={() => saveMutation.mutate(draft)}
               disabled={saveMutation.isPending || draft.trim() === displayText.trim()}
-              className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 rounded-lg text-xs font-medium text-white transition-colors"
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold transition-all disabled:opacity-40"
+              style={{ background: 'var(--accent)', color: '#0a0906' }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.filter = 'brightness(1.1)'; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.filter = 'none'; }}
             >
               {saveMutation.isPending ? 'Saving…' : 'Save'}
             </button>
             <button
-              onClick={handleCancel}
+              onClick={() => { setDraft(displayText); setEditing(false); }}
               disabled={saveMutation.isPending}
-              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-xs font-medium text-gray-300 transition-colors"
+              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+              style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = 'var(--text-primary)'; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = 'var(--text-secondary)'; }}
             >
               Cancel
             </button>
             {block.isEdited && (
               <button
-                onClick={() => {
-                  setDraft(block.generatedText);
-                  saveMutation.mutate(block.generatedText);
-                }}
+                onClick={() => { setDraft(block.generatedText); saveMutation.mutate(block.generatedText); }}
                 disabled={saveMutation.isPending}
-                className="ml-auto text-xs text-gray-600 hover:text-gray-400 transition-colors"
+                className="ml-auto text-xs transition-colors"
+                style={{ color: 'var(--text-muted)' }}
+                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = 'var(--text-secondary)'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'; }}
               >
                 Reset to original
               </button>
             )}
           </div>
           {saveMutation.isError && (
-            <p className="text-xs text-red-400">Failed to save. Please try again.</p>
+            <p className="text-xs" style={{ color: 'var(--red)' }}>Failed to save. Please try again.</p>
           )}
         </div>
-      ) : (
-        renderContent()
-      )}
+      ) : renderContent(block)}
     </div>
   );
 }
 
-// ── View toggle ───────────────────────────────────────────────────────────────
-
 type View = 'resume' | 'interview';
-
-const RESUME_TYPES: ContentType[] = ['PORTFOLIO_SUMMARY', 'RESUME_BULLETS', 'TECH_STACK', 'PROJECT_TAGS'];
+const RESUME_TYPES: ContentType[]   = ['PORTFOLIO_SUMMARY', 'RESUME_BULLETS', 'TECH_STACK', 'PROJECT_TAGS'];
 const INTERVIEW_TYPES: ContentType[] = ['ONE_SENTENCE_PITCH', 'TALKING_POINTS', 'INTERVIEW_STORY'];
-
-const RESUME_ORDER = ['PORTFOLIO_SUMMARY', 'RESUME_BULLETS', 'TECH_STACK', 'PROJECT_TAGS'];
+const RESUME_ORDER   = ['PORTFOLIO_SUMMARY', 'RESUME_BULLETS', 'TECH_STACK', 'PROJECT_TAGS'];
 const INTERVIEW_ORDER = ['ONE_SENTENCE_PITCH', 'TALKING_POINTS', 'INTERVIEW_STORY'];
-
-// ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ResultsPage() {
   const { repoId } = useParams<{ repoId: string }>();
-  const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { data: user } = useCurrentUser();
   const [view, setView] = useState<View>('resume');
 
   const { data: content = [], isLoading } = useQuery({
@@ -259,153 +278,154 @@ export default function ResultsPage() {
 
   const handleSaved = (contentId: string, newText: string) => {
     queryClient.setQueryData<ContentBlock[]>(['content', repoId], old =>
-      old?.map(b =>
-        b.id === contentId ? { ...b, editedText: newText, isEdited: true } : b
-      )
+      old?.map(b => b.id === contentId ? { ...b, editedText: newText, isEdited: true } : b)
     );
     queryClient.invalidateQueries({ queryKey: ['projects'] });
   };
 
   const activeTypes = view === 'resume' ? RESUME_TYPES : INTERVIEW_TYPES;
   const activeOrder = view === 'resume' ? RESUME_ORDER : INTERVIEW_ORDER;
-
   const visibleBlocks = content
     .filter(b => activeTypes.includes(b.contentType))
     .sort((a, b) => activeOrder.indexOf(a.contentType) - activeOrder.indexOf(b.contentType));
-
   const hasInterviewContent = content.some(b => INTERVIEW_TYPES.includes(b.contentType));
   const editedCount = content.filter(b => b.isEdited).length;
+  const isAnalyzing = reanalyzeMutation.isPending || !!activeJobId;
 
   return (
-    <div className="min-h-screen bg-gray-950 text-white">
-      <header className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">GitHub Portfolio Intelligence</h1>
-        <div className="flex items-center gap-4">
-          {user?.avatarUrl && (
-            <img src={user.avatarUrl} alt={user.username} className="w-8 h-8 rounded-full" />
+    <Layout maxWidth="lg" navLinks={[{ label: '← Workspace', to: '/workspace' }]}>
+      {/* Page header */}
+      <div className="flex items-center justify-between mb-7 animate-fade-up">
+        <div className="flex items-center gap-3">
+          <h1 className="font-display text-3xl" style={{ color: 'var(--text-primary)' }}>
+            Generated Content
+          </h1>
+          {editedCount > 0 && (
+            <span
+              className="px-2 py-0.5 text-xs font-mono-dm rounded-full"
+              style={{ background: 'var(--accent-glow)', border: '1px solid var(--accent-border)', color: 'var(--accent)' }}
+            >
+              {editedCount} edited
+            </span>
           )}
-          <span className="text-gray-300 text-sm">{user?.username}</span>
-          <button
-            onClick={() => { window.location.href = `${BACKEND_URL}/auth/logout`; }}
-            className="text-sm text-gray-400 hover:text-white transition-colors"
-          >
-            Log out
-          </button>
         </div>
-      </header>
-
-      <main className="max-w-3xl mx-auto px-6 py-8">
-        {/* Title row */}
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => navigate('/workspace')}
-              className="text-gray-400 hover:text-white transition-colors text-sm flex items-center gap-1"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-              </svg>
-              Workspace
-            </button>
-            <span className="text-gray-700">/</span>
-            <h2 className="text-2xl font-bold">Generated Content</h2>
-            {editedCount > 0 && (
-              <span className="px-2 py-0.5 text-xs bg-violet-950 text-violet-400 border border-violet-800/50 rounded-full">
-                {editedCount} edited
-              </span>
-            )}
-          </div>
-          <button
-            onClick={() => reanalyzeMutation.mutate()}
-            disabled={reanalyzeMutation.isPending || !!activeJobId}
-            className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+        <button
+          onClick={() => reanalyzeMutation.mutate()}
+          disabled={isAnalyzing}
+          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-150 disabled:opacity-50"
+          style={{
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border)',
+            color: 'var(--text-secondary)',
+          }}
+          onMouseEnter={e => {
+            if (!isAnalyzing) {
+              (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-light)';
+              (e.currentTarget as HTMLElement).style.color = 'var(--text-primary)';
+            }
+          }}
+          onMouseLeave={e => {
+            (e.currentTarget as HTMLElement).style.borderColor = 'var(--border)';
+            (e.currentTarget as HTMLElement).style.color = 'var(--text-secondary)';
+          }}
+        >
+          <svg
+            className={`w-4 h-4 ${isAnalyzing ? 'animate-spin' : ''}`}
+            fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
           >
-            <svg
-              className={`w-4 h-4 ${reanalyzeMutation.isPending ? 'animate-spin' : ''}`}
-              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            {(reanalyzeMutation.isPending || !!activeJobId) ? 'Analyzing...' : 'Re-analyze'}
-          </button>
-        </div>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          {isAnalyzing ? 'Analyzing…' : 'Re-analyze'}
+        </button>
+      </div>
 
-        {/* View toggle */}
-        {content.length > 0 && (
-          <div className="flex gap-1 p-1 bg-gray-900 border border-gray-800 rounded-lg w-fit mb-6">
+      {/* View toggle */}
+      {content.length > 0 && (
+        <div
+          className="flex gap-1 p-1 rounded-xl w-fit mb-7 animate-fade-up stagger-1"
+          style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
+        >
+          {(['resume', 'interview'] as View[]).map(v => (
             <button
-              onClick={() => setView('resume')}
-              className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                view === 'resume'
-                  ? 'bg-violet-600 text-white'
-                  : 'text-gray-400 hover:text-white'
-              }`}
+              key={v}
+              onClick={() => setView(v)}
+              className="px-4 py-1.5 rounded-lg text-sm font-medium transition-all duration-150 capitalize"
+              style={{
+                background: view === v ? 'var(--accent)' : 'transparent',
+                color: view === v ? '#0a0906' : 'var(--text-muted)',
+              }}
             >
-              Resume
-            </button>
-            <button
-              onClick={() => setView('interview')}
-              className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                view === 'interview'
-                  ? 'bg-violet-600 text-white'
-                  : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              Interview
-              {!hasInterviewContent && (
-                <span className="ml-1.5 text-[10px] text-gray-500">(re-analyze to generate)</span>
+              {v}
+              {v === 'interview' && !hasInterviewContent && (
+                <span className="ml-1.5 text-[10px] opacity-60">(re-analyze)</span>
               )}
             </button>
-          </div>
-        )}
+          ))}
+        </div>
+      )}
 
-        {isLoading ? (
-          <div className="text-center py-20 text-gray-500">Loading...</div>
-        ) : content.length === 0 ? (
-          <div className="text-center py-20">
-            <p className="text-gray-400 mb-4">No content generated yet.</p>
-            <button
-              onClick={() => reanalyzeMutation.mutate()}
-              disabled={reanalyzeMutation.isPending || !!activeJobId}
-              className="px-6 py-3 bg-violet-600 hover:bg-violet-500 rounded-xl font-semibold transition-colors disabled:opacity-50"
-            >
-              {reanalyzeMutation.isPending ? 'Analyzing...' : 'Analyze Now'}
-            </button>
-          </div>
-        ) : visibleBlocks.length === 0 ? (
-          <div className="text-center py-16 text-gray-500">
-            <p className="mb-3">No interview content yet.</p>
-            <button
-              onClick={() => reanalyzeMutation.mutate()}
-              disabled={reanalyzeMutation.isPending || !!activeJobId}
-              className="px-5 py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-sm font-semibold text-white transition-colors disabled:opacity-50"
-            >
-              Re-analyze to generate
-            </button>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {visibleBlocks.map(block => (
-              <ContentCard
-                key={block.id}
-                block={block}
-                repoId={repoId!}
-                onSaved={handleSaved}
-              />
-            ))}
-          </div>
-        )}
+      {/* Content */}
+      {isLoading ? (
+        <div className="space-y-3">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="rounded-xl h-28 skeleton" style={{ border: '1px solid var(--border)' }} />
+          ))}
+        </div>
+      ) : content.length === 0 ? (
+        <div className="text-center py-24 animate-fade-up">
+          <p className="text-sm mb-5" style={{ color: 'var(--text-muted)' }}>No content generated yet.</p>
+          <button
+            onClick={() => reanalyzeMutation.mutate()}
+            disabled={isAnalyzing}
+            className="px-6 py-3 rounded-xl font-semibold text-sm transition-all disabled:opacity-50"
+            style={{ background: 'var(--accent)', color: '#0a0906' }}
+            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.filter = 'brightness(1.1)'; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.filter = 'none'; }}
+          >
+            {isAnalyzing ? 'Analyzing…' : 'Analyze Now'}
+          </button>
+        </div>
+      ) : visibleBlocks.length === 0 ? (
+        <div className="text-center py-16 animate-fade-up">
+          <p className="text-sm mb-4" style={{ color: 'var(--text-muted)' }}>No interview content yet.</p>
+          <button
+            onClick={() => reanalyzeMutation.mutate()}
+            disabled={isAnalyzing}
+            className="px-5 py-2 rounded-lg text-sm font-semibold transition-all disabled:opacity-50"
+            style={{ background: 'var(--accent)', color: '#0a0906' }}
+            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.filter = 'brightness(1.1)'; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.filter = 'none'; }}
+          >
+            Re-analyze to generate
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-3 animate-fade-up stagger-2">
+          {visibleBlocks.map(block => (
+            <ContentCard key={block.id} block={block} repoId={repoId!} onSaved={handleSaved} />
+          ))}
+        </div>
+      )}
 
-        {(reanalyzeMutation.isPending || !!activeJobId) && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 text-center">
-              <div className="w-8 h-8 border-2 border-violet-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-              <p className="text-white font-medium">Analyzing repository...</p>
-              <p className="text-gray-400 text-sm mt-1">Extracting signals and generating content</p>
-            </div>
+      {/* Re-analyze overlay */}
+      {isAnalyzing && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in"
+          style={{ background: 'rgba(10,9,6,0.7)', backdropFilter: 'blur(4px)' }}
+        >
+          <div
+            className="p-8 rounded-2xl text-center"
+            style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
+          >
+            <div
+              className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin mx-auto mb-4"
+              style={{ borderColor: 'var(--accent)', borderTopColor: 'transparent' }}
+            />
+            <p className="font-medium mb-1" style={{ color: 'var(--text-primary)' }}>Analyzing repository…</p>
+            <p className="text-sm" style={{ color: 'var(--text-muted)' }}>Extracting signals and generating content</p>
           </div>
-        )}
-      </main>
-    </div>
+        </div>
+      )}
+    </Layout>
   );
 }
