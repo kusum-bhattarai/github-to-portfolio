@@ -68,14 +68,24 @@ export interface AnalysisJob {
 
 export const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? '';
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BACKEND_URL}${path}`, { credentials: 'include', ...options });
-  if (!res.ok) {
-    const err = new Error(`HTTP ${res.status}`);
-    (err as Error & { status: number }).status = res.status;
-    throw err;
+async function request<T>(path: string, options?: RequestInit, timeoutMs = 15_000): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${BACKEND_URL}${path}`, {
+      credentials: 'include',
+      signal: controller.signal,
+      ...options,
+    });
+    if (!res.ok) {
+      const err = new Error(`HTTP ${res.status}`);
+      (err as Error & { status: number }).status = res.status;
+      throw err;
+    }
+    return res.json();
+  } finally {
+    clearTimeout(timer);
   }
-  return res.json();
 }
 
 export const api = {

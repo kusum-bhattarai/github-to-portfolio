@@ -26,7 +26,7 @@ public interface AnalysisJobRepository extends JpaRepository<AnalysisJob, UUID> 
     Page<AnalysisJob> findByUser(@Param("user") User user, Pageable pageable);
 
     /** Idempotency check — find an active (non-terminal) job for this repo. */
-    @Query("SELECT j FROM AnalysisJob j WHERE j.repository = :repo AND j.status NOT IN :terminalStatuses ORDER BY j.createdAt DESC")
+    @Query("SELECT j FROM AnalysisJob j JOIN FETCH j.repository WHERE j.repository = :repo AND j.status NOT IN :terminalStatuses ORDER BY j.createdAt DESC")
     Optional<AnalysisJob> findActiveJobForRepo(
             @Param("repo") Repository repo,
             @Param("terminalStatuses") List<JobStatus> terminalStatuses);
