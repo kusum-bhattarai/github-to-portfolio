@@ -13,7 +13,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const [timedOut, setTimedOut] = useState(false);
 
   useEffect(() => {
-    if (!isLoading) { setSlowLoad(false); setTimedOut(false); return; }
+    if (!isLoading) return;
     const slow = setTimeout(() => setSlowLoad(true), 5_000);
     const timeout = setTimeout(() => setTimedOut(true), 18_000);
     return () => { clearTimeout(slow); clearTimeout(timeout); };
