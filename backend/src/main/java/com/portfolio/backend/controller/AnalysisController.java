@@ -49,7 +49,7 @@ public class AnalysisController {
                         return ResponseEntity.status(404).<Object>build();
                     }
                     AnalysisJob job = submitJob(user, repo);
-                    return ResponseEntity.ok(toJobDto(job, repo));
+                    return ResponseEntity.ok(toJobDto(job));
                 })
                 .orElse(ResponseEntity.status(401).build());
     }
@@ -79,7 +79,7 @@ public class AnalysisController {
                             UUID repoId = UUID.fromString(idStr);
                             Repository repo = repositoryRepository.findByIdAndUser(repoId, user).orElse(null);
                             if (repo == null) continue;
-                            jobs.add(toJobDto(submitJob(user, repo), repo));
+                            jobs.add(toJobDto(submitJob(user, repo)));
                         } catch (IllegalArgumentException ignored) { /* bad UUID */ }
                     }
                     return ResponseEntity.ok(jobs);
@@ -162,7 +162,8 @@ public class AnalysisController {
         return userRepository.findByGithubId(githubId);
     }
 
-    private Map<String, Object> toJobDto(AnalysisJob job, Repository repo) {
+    private Map<String, Object> toJobDto(AnalysisJob job) {
+        Repository repo = job.getRepository();
         Map<String, Object> dto = new LinkedHashMap<>();
         dto.put("jobId", job.getId());
         dto.put("repoId", repo.getId());
